@@ -1,0 +1,134 @@
+# GitHub search queries. The date qualifier (committer-date / created) is
+# appended automatically per window; do not put dates in `q`.
+#   kind = "commits"  searches commit messages
+#   kind = "issues"   searches issues and PRs (use is:issue / is:pr)
+#   title_pattern     optional Python regex applied locally to hit titles
+#
+# Noise notes (measured on 2026-08-03, one day, unauthenticated):
+#   is:pr "2026-07-28"             ~7,200 hits  (date strings everywhere; unusable)
+#   is:pr "2026-07-28" mcp         ~1,500 hits  (needs 1-day windows)
+#   is:pr "2026-07-28" in:title mcp    ~29 hits (high precision)
+#   commits "2026-07-28" mcp         ~270 hits
+#
+# Yields measured on the 2026-09-15 run (see per-query notes below):
+#   pr_title_revision_2026      1,453 hits
+#   commit_revision_2026       14,355 hits / 7,682 repos (titles look precise)
+#   pr_migrate_ts_v2_packages   5,041 hits / 3,150 repos -> 33% after title filter
+#
+# Window sizes were set from measured yield on 2026-09-16 (total_count over each
+# query's full span), targeting roughly 800 hits per window -- comfortably under
+# the 1,000 cap, and self-correcting because a window over the cap is halved
+# automatically down to a 15-minute floor. Sizing windows to the yield matters:
+# the first run used a 1-day default for pr_dependabot_mcp_major and spent 44
+# requests covering 44 days that 7-day windows cover in 7.
+#   query                        hits/day over its span
+#   pr_dependabot_mcp_major        110.5
+#   commit_fastmcp_to_mcpserver     51.4
+#   commit_revision_2025_11         30.7
+#   commit_revision_2025_06         20.2
+#   commit_streamable_http           7.9
+#   issue_fastmcp_import_error       5.4
+#   pr_renovate_mcp_v2               2.8
+#   issue_mcperror_import            0.4
+#   issue_no_back_channel            0.2
+# Pagination, not windowing, dominates the remaining cost: these nine queries
+# return ~34,900 hits, which is ~350 page fetches at 100 per page whatever the
+# window size.
+
+[defaults]
+start = 2026-05-21        # 2026-07-28 release candidate locked
+window_days = 1
+
+# --- 2026-07-28 revision / SDK v2: high precision ---------------------------
+[[query]]
+name = "pr_title_revision_2026"
+kind = "issues"
+q = 'is:pr "2026-07-28" in:title mcp'
+window_days = 7
+
+[[query]]
+name = "commit_revision_2026"
+kind = "commits"
+q = '"2026-07-28" mcp'
+
+# Measured 2026-09-15 over 2026-06-29..2026-09-15: 5,041 hits / 3,150 repos, but
+# only 32% mention MCP in the title -- the phrase also matches lockfile diffs and
+# unrelated dependency bumps, and one repo alone contributed 426 hits. The title
+# filter keeps migration-related titles that omit "mcp" (codemod, stateless,
+# v1->v2) and drops the dependency churn: 1,675 hits / 1,356 repos.
+[[query]]
+name = "pr_migrate_ts_v2_packages"
+kind = "issues"
+q = 'is:pr "@modelcontextprotocol/server" migrate'
+title_pattern = '(?i)\bmcp\b|modelcontextprotocol|migrat|codemod|stateless|v1\W*(to|->)\W*v2'
+start = 2026-06-29        # beta SDKs released
+
+[[query]]
+name = "pr_dependabot_mcp_major"
+kind = "issues"
+q = 'is:pr author:app/dependabot "bump mcp" in:title'
+title_pattern = '(?i)bump mcp from 1\.\S+ to 2\.'
+start = 2026-07-20
+window_days = 7
+
+[[query]]
+name = "pr_renovate_mcp_v2"
+kind = "issues"
+q = 'is:pr author:app/renovate "update dependency mcp to v2" in:title'
+start = 2026-07-20
+window_days = 60
+
+[[query]]
+name = "commit_fastmcp_to_mcpserver"
+kind = "commits"
+q = 'MCPServer FastMCP'
+start = 2026-06-29
+window_days = 14
+
+# --- Breakage reported downstream ---------------------------------------------
+[[query]]
+name = "issue_fastmcp_import_error"
+kind = "issues"
+q = 'is:issue "mcp.server.fastmcp" ModuleNotFoundError'
+start = 2026-06-29
+window_days = 90
+
+[[query]]
+name = "issue_mcperror_import"
+kind = "issues"
+q = 'is:issue McpError "cannot import"'
+start = 2026-06-29
+window_days = 90
+
+[[query]]
+name = "issue_no_back_channel"
+kind = "issues"
+q = 'is:issue NoBackChannelError'
+start = 2026-06-29
+window_days = 90
+
+# --- Earlier revisions (multi-revision history; noise not yet measured) -------
+[[query]]
+name = "commit_streamable_http"
+kind = "commits"
+q = 'mcp StreamableHTTPServerTransport'
+start = 2025-03-01
+window_days = 90
+
+# 30-day windows drew an `incomplete_results` flag from GitHub on
+# 2026-05-27..2026-06-25 (the server-side search timed out and returned a
+# partial page set), so this query runs at 14 days even though its yield would
+# permit 30. Completeness beats the saved requests.
+[[query]]
+name = "commit_revision_2025_06"
+kind = "commits"
+q = '"2025-06-18" mcp'
+start = 2025-06-01
+window_days = 14
+
+[[query]]
+name = "commit_revision_2025_11"
+kind = "commits"
+q = '"2025-11-25" mcp'
+start = 2025-11-01
+window_days = 21

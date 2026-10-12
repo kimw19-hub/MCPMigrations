@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Episode Labeling</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd;
+  --accent: #2f5bd3; --accent-soft: #e6ecfb; --add: #1f7a3d; --add-bg: #e6f4ea;
+  --del: #b42318; --del-bg: #fdecea; --warn: #9a5b00; --warn-bg: #fff4e0;
+  --done: #1f7a3d; --todo: #a3a29c; --hl: #fff2a8; --code: #f2f1ed;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #9c9b95; --line: #33332f;
+    --accent: #7c9cf0; --accent-soft: #263257; --add: #6fd08c; --add-bg: #17301f;
+    --del: #f2877c; --del-bg: #3a1c19; --warn: #f0b660; --warn-bg: #352812;
+    --done: #6fd08c; --todo: #6b6a65; --hl: #5a4d0f; --code: #262624;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+button {
+  font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; border-color: var(--line); }
+input[type=search], textarea {
+  font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; width: 100%;
+}
+input:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+header {
+  display: flex; align-items: center; gap: 16px; padding: 8px 16px;
+  border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap;
+}
+header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+.progress { flex: 1; min-width: 200px; display: flex; align-items: center; gap: 10px; }
+.bar { flex: 1; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; display: flex; }
+.bar span { display: block; height: 100%; }
+.bar .d { background: var(--done); } .bar .i { background: var(--warn); }
+.counts { color: var(--muted); white-space: nowrap; font-size: 13px; }
+
+main { display: grid; grid-template-columns: 300px minmax(0, 1fr) 360px; height: calc(100% - 49px); }
+main > section { overflow-y: auto; }
+#list-pane { border-right: 1px solid var(--line); display: flex; flex-direction: column; overflow: hidden; }
+#list-tools { padding: 10px; display: grid; gap: 8px; border-bottom: 1px solid var(--line); }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; }
+.chip.on { background: var(--accent-soft); border-color: var(--accent); }
+#list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+#list li {
+  padding: 7px 10px; border-bottom: 1px solid var(--line); cursor: pointer;
+  display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: center;
+}
+#list li:hover { background: var(--accent-soft); }
+#list li.sel { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+#list .repo { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#list .sub { color: var(--muted); font-size: 12px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--todo); }
+.dot.done { background: var(--done); } .dot.incomplete { background: var(--warn); }
+.pos { color: var(--muted); font-size: 12px; text-align: right; }
+
+#detail { padding: 16px 20px 60px; }
+#detail h2 { font-size: 17px; margin: 0 0 4px; word-break: break-all; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); margin: 6px 0 12px; }
+.facts b { color: var(--text); font-weight: 600; }
+.links { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.links a { border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; background: var(--panel); }
+.box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.blind { border-style: dashed; }
+.blind .hidden-note { color: var(--muted); }
+.sig { display: inline-block; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; padding: 1px 6px; border-radius: 4px; margin: 1px 3px 1px 0; }
+.sig.add { background: var(--add-bg); color: var(--add); }
+.sig.del { background: var(--del-bg); color: var(--del); }
+.sig.dep { background: var(--warn-bg); color: var(--warn); }
+.commit { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; }
+.commit-head { padding: 8px 12px; display: grid; gap: 4px; }
+.commit-top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.commit-msg { font-weight: 500; word-break: break-word; }
+.commit-meta { color: var(--muted); font-size: 12px; }
+.files { font-size: 12px; color: var(--muted); }
+.files a { margin-right: 10px; }
+.gh { border-top: 1px solid var(--line); padding: 8px 12px; display: grid; gap: 8px; }
+.gh pre.msg { white-space: pre-wrap; margin: 0; background: var(--code); padding: 8px; border-radius: 6px; max-height: 260px; overflow: auto; }
+.trailer.agent { background: var(--warn-bg); color: var(--warn); border-radius: 4px; padding: 0 4px; }
+.pr { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.pr pre { white-space: pre-wrap; margin: 6px 0 0; max-height: 220px; overflow: auto; background: var(--code); padding: 6px; border-radius: 6px; }
+details > summary { cursor: pointer; }
+.patch { margin: 4px 0 0; background: var(--code); border-radius: 6px; overflow-x: auto; max-height: 480px; overflow-y: auto; }
+.patch div { white-space: pre; padding: 0 8px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.patch .a { background: var(--add-bg); } .patch .r { background: var(--del-bg); }
+.patch .h { color: var(--muted); }
+.patch .s { box-shadow: inset 4px 0 var(--warn); font-weight: 600; }
+.patch .s::after { content: attr(data-s); float: right; color: var(--warn); font-weight: 400; padding-left: 12px; }
+.err { color: var(--del); }
+.muted { color: var(--muted); }
+
+#form-pane { border-left: 1px solid var(--line); background: var(--panel); padding: 14px 16px 40px; }
+.field { margin-bottom: 16px; }
+.field > label, .field > .label { display: flex; justify-content: space-between; font-weight: 600; margin-bottom: 5px; }
+.field .hint { font-weight: 400; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.seg { display: flex; flex-wrap: wrap; gap: 4px; }
+.seg button { font-size: 12.5px; padding: 3px 8px; }
+.seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+fieldset { border: 0; padding: 0; margin: 0; }
+fieldset:disabled { opacity: .4; }
+.dep-row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 13px; }
+.save-state { font-size: 12px; color: var(--muted); }
+.save-state.error { color: var(--del); }
+.status-line { padding: 8px 10px; border-radius: 6px; margin-bottom: 14px; font-size: 13px; }
+.status-line.todo { background: var(--code); }
+.status-line.incomplete { background: var(--warn-bg); color: var(--warn); }
+.status-line.done { background: var(--add-bg); color: var(--add); }
+.nav { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+kbd { font-family: ui-monospace, Menlo, monospace; font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; color: var(--muted); }
+.undo { font-size: 12px; margin-top: 6px; }
+
+dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); width: min(860px, 94vw); max-height: 86vh; padding: 0; }
+dialog::backdrop { background: rgb(0 0 0 / .35); }
+dialog .dhead { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+dialog .dbody { padding: 4px 20px 20px; overflow-y: auto; max-height: calc(86vh - 50px); }
+dialog table { border-collapse: collapse; font-size: 13px; }
+dialog td, dialog th { border: 1px solid var(--line); padding: 4px 6px; vertical-align: top; text-align: left; }
+.keys td { border: 0; padding: 3px 10px 3px 0; }
+
+@media (max-width: 1100px) {
+  main { grid-template-columns: 240px minmax(0, 1fr); }
+  #form-pane { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--line); }
+  main { height: auto; } main > section { overflow: visible; }
+  #list-pane { max-height: 60vh; }
+}
+@media (max-width: 700px) {
+  main { grid-template-columns: 1fr; }
+  header, #detail { padding-left: 16px; padding-right: 16px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Episode labeling <span class="muted" id="coder"></span></h1>
+  <div class="progress">
+    <div class="bar" title="done / incomplete / to do"><span class="d" id="bar-d"></span><span class="i" id="bar-i"></span></div>
+    <span class="counts" id="counts"></span>
+  </div>
+  <button id="btn-codebook">Codebook</button>
+  <button id="btn-keys" title="Keyboard shortcuts">?</button>
+</header>
+
+<main>
+  <section id="list-pane">
+    <div id="list-tools">
+      <input type="search" id="q" placeholder="Search repo, message, file, signal…  ( / )" autocomplete="off">
+      <div class="chips" id="state-chips">
+        <button class="chip on" data-state="">All</button>
+        <button class="chip" data-state="todo">To do</button>
+        <button class="chip" data-state="incomplete">Incomplete</button>
+        <button class="chip" data-state="done">Done</button>
+      </div>
+      <label class="muted" style="font-size:12px"><input type="checkbox" id="show-detector"> Show detector labels in the list</label>
+    </div>
+    <ul id="list"></ul>
+  </section>
+
+  <section id="detail"><p class="muted">Loading…</p></section>
+
+  <section id="form-pane">
+    <div id="status-line" class="status-line todo">Not coded yet</div>
+    <div class="field">
+      <div class="label"><span>detector_correct</span><span class="muted"><kbd>y</kbd> <kbd>n</kbd></span></div>
+      <div class="seg" data-col="detector_correct"></div>
+      <div class="hint">Is this really migration-related? Check that matched calls are MCP's, not another LLM library's.</div>
+      <div class="undo" id="undo" hidden></div>
+    </div>
+    <fieldset id="if-correct">
+      <div class="field">
+        <div class="label"><span>end_state</span></div>
+        <div class="seg" data-col="end_state"></div>
+        <div class="hint">State <i>after</i> the episode. <code>modern_only</code> needs evidence of legacy removal; otherwise prefer <code>sdk_v2_default</code>.</div>
+      </div>
+      <div class="field">
+        <div class="label"><span>trigger</span></div>
+        <div class="seg" data-col="trigger"></div>
+        <div class="hint">Why it happened. Check linked issues/PRs and the first message. <code>unknown</code> beats a guess.</div>
+      </div>
+      <div class="field">
+        <div class="label"><span>author_kind_verified</span></div>
+        <div class="seg" data-col="author_kind_verified"></div>
+        <div class="hint"><code>human</code> only with positive evidence; check PR bodies and trailers.</div>
+      </div>
+      <div class="field">
+        <div class="label"><span>deprecated</span><span class="muted">usually blank</span></div>
+        <div id="dep"></div>
+        <div class="hint">Only if sampling, roots, protocol logging or resource subscriptions are touched. <code>replaced</code> = the behaviour survives by other means (say how in notes).</div>
+      </div>
+    </fieldset>
+    <div class="field">
+      <label for="notes"><span>notes</span><span class="save-state" id="save-state"></span></label>
+      <textarea id="notes" rows="5" placeholder="Required when a cell is blank, for every 'no', and for close calls."></textarea>
+    </div>
+    <div class="nav">
+      <button id="prev">← Prev <kbd>k</kbd></button>
+      <button id="next">Next <kbd>j</kbd></button>
+      <button id="next-todo">Next uncoded <kbd>u</kbd></button>
+    </div>
+  </section>
+</main>
+
+<dialog id="codebook">
+  <div class="dhead"><b>Codebook</b><button data-close>Close</button></div>
+  <div class="dbody" id="codebook-body">Loading…</div>
+</dialog>
+<dialog id="keys">
+  <div class="dhead"><b>Keyboard shortcuts</b><button data-close>Close</button></div>
+  <div class="dbody"><table class="keys">
+    <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>next / previous episode in the list</td></tr>
+    <tr><td><kbd>u</kbd></td><td>next episode not yet done</td></tr>
+    <tr><td><kbd>y</kbd> / <kbd>n</kbd></td><td>detector_correct yes / no</td></tr>
+    <tr><td><kbd>g</kbd></td><td>load GitHub details for every commit shown</td></tr>
+    <tr><td><kbd>r</kbd></td><td>reveal the detector's labels for this episode</td></tr>
+    <tr><td><kbd>o</kbd></td><td>open the whole episode diff on GitHub</td></tr>
+    <tr><td><kbd>/</kbd></td><td>search</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>leave a text field</td></tr>
+  </table>
+  <p class="muted">Every change is saved to your sheet as you make it.</p></div>
+</dialog>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+};
+const COMMITS_SHOWN = 40;
+const AUTO_LOAD_MAX = 5;
+
+let meta = null;          // /api/meta
+let rows = [];            // the filtered list
+let current = null;       // {episode, labels, status}
+let labels = {};          // the form's working copy
+let revealed = new Set(); // episodes whose detector output the coder has chosen to see
+let filter = { q: "", state: "" };
+let saveChain = Promise.resolve();
+let undoSnapshot = null;
+
+async function api(path, opts = {}) {
+  const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(body.detail || resp.statusText);
+  return body;
+}
+
+/* ---------- list ---------- */
+async function loadList() {
+  const params = new URLSearchParams({ q: filter.q, state: filter.state });
+  rows = await api(`/api/episodes?${params}`);
+  renderList();
+}
+async function refreshCounts() {
+  const all = await api("/api/episodes");
+  const n = all.length, d = all.filter(r => r.status === "done").length,
+        i = all.filter(r => r.status === "incomplete").length;
+  $("#bar-d").style.width = `${100 * d / n}%`;
+  $("#bar-i").style.width = `${100 * i / n}%`;
+  $("#counts").textContent = `${d} done · ${i} incomplete · ${n - d - i} to do · ${n} total`;
+}
+function renderList() {
+  const showDet = $("#show-detector").checked;
+  const sel = current?.episode.episode_id;
+  $("#list").innerHTML = rows.map(r => `
+    <li data-id="${esc(r.episode_id)}" class="${r.episode_id === sel ? "sel" : ""}">
+      <span class="dot ${r.status}" title="${r.status}"></span>
+      <span><div class="repo" title="${esc(r.episode_id)}">${esc(r.episode_id)}</div>
+        <div class="sub">${esc(r.start)} · ${esc(r.n_commits)} commit${r.n_commits == 1 ? "" : "s"}${showDet ? ` · ${esc(r.kind)} · ${esc(r.head_static_era)}` : ""}</div></span>
+      <span class="pos">#${r.position}</span>
+    </li>`).join("") || `<li class="muted" style="display:block">No episodes match.</li>`;
+  $("#list .sel")?.scrollIntoView({ block: "nearest" });
+}
+function updateListRow(id, status) {
+  const r = rows.find(x => x.episode_id === id);
+  if (r) r.status = status;
+  const li = $(`#list li[data-id="${CSS.escape(id)}"] .dot`);
+  if (li) { li.className = `dot ${status}`; li.title = status; }
+}
+
+/* ---------- detail ---------- */
+async function openEpisode(id) {
+  if (!id) return;
+  await saveChain;
+  try { current = await api(`/api/episode?id=${encodeURIComponent(id)}`); }
+  catch (e) { $("#detail").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  labels = { ...current.labels };
+  undoSnapshot = null;
+  if (labels.detector_correct) revealed.add(id);
+  history.replaceState(null, "", `#${encodeURIComponent(id)}`);
+  store.set("last-episode", id);
+  renderDetail();
+  renderForm();
+  renderList();
+  const ep = current.episode;
+  if (meta.github && ep.commits.length <= AUTO_LOAD_MAX) loadAllGitHub();
+}
+
+function sigChips(counts, cls) {
+  return Object.keys(counts || {}).sort().map(k => `<span class="sig ${cls}">${cls === "add" ? "+" : "−"} ${esc(k)}</span>`).join("");
+}
+
+function renderDetail() {
+  const ep = current.episode, id = ep.episode_id;
+  const isRevealed = revealed.has(id);
+  const revs = [...(ep.revisions_added || []).map(r => `+${r}`), ...(ep.revisions_removed || []).map(r => `−${r}`)];
+  const shown = ep.commits.slice(0, ep._showAll ? undefined : COMMITS_SHOWN);
+  $("#detail").innerHTML = `
+    <h2>${esc(id)}</h2>
+    <div class="facts">
+      <span><b>${esc(ep.start.slice(0, 10))}</b> → <b>${esc(ep.end.slice(0, 10))}</b> (${ep.duration_days} days)</span>
+      <span><b>${ep.n_commits}</b> commit${ep.n_commits === 1 ? "" : "s"}</span>
+      <span><b class="sig add">+${ep.lines_added}</b> <b class="sig del">−${ep.lines_deleted}</b> lines</span>
+      ${revs.length ? `<span>revision literals: ${revs.map(esc).join(", ")}</span>` : ""}
+    </div>
+    <div class="links">
+      <a href="${esc(ep.links.range)}" target="_blank" rel="noopener">Whole episode diff ↗</a>
+      <a href="${esc(ep.links.pulls)}" target="_blank" rel="noopener">PRs ±14 days ↗</a>
+      <a href="${esc(ep.links.issues)}" target="_blank" rel="noopener">Issues ±14 days ↗</a>
+      <a href="${esc(ep.links.history)}" target="_blank" rel="noopener">History ↗</a>
+      <a href="${esc(ep.links.repo)}" target="_blank" rel="noopener">Repository ↗</a>
+    </div>
+    ${(ep.deprecated_removed || []).length || (ep.replacements || []).length ? `<div class="box">
+      ${(ep.deprecated_removed || []).length ? `<div>Deprecated-feature signals removed: ${ep.deprecated_removed.map(d => `<span class="sig dep">${esc(d)}</span>`).join("")}</div>` : ""}
+      ${(ep.replacements || []).length ? `<div>Possible replacements: ${ep.replacements.map(d => `<span class="sig dep">${esc(d)}</span>`).join("")}</div>` : ""}
+      <div class="muted" style="font-size:12px">Method names also match non-MCP libraries; check the call is MCP's.</div>
+    </div>` : ""}
+    <div class="box blind">${isRevealed ? `
+      <b>Detector output</b> &nbsp; kind <code>${esc(ep.kind)}</code> · HEAD era <code>${esc(ep.head_static_era)}</code> · scope <code>${esc(ep.scope)}</code> · author kinds ${(ep.author_kinds || []).map(a => `<code>${esc(a)}</code>`).join(" ")}
+      ` : `<span class="hidden-note">Detector labels hidden until you answer detector_correct, so you form your own view first (codebook step 6).</span>
+      <button id="reveal" style="margin-left:8px">Reveal <kbd>r</kbd></button>`}
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:16px 0 8px">
+      <b>Commits</b>
+      ${meta.github ? `<button id="load-all">Load GitHub details <kbd>g</kbd></button>` : `<span class="muted">GitHub lookups off</span>`}
+    </div>
+    <div id="commits">${shown.map(c => commitCard(c, ep.repo, isRevealed)).join("")}</div>
+    ${ep.commits.length > shown.length ? `<button id="show-all">Show all ${ep.commits.length} commits</button>` : ""}
+  `;
+  $("#reveal")?.addEventListener("click", reveal);
+  $("#load-all")?.addEventListener("click", loadAllGitHub);
+  $("#show-all")?.addEventListener("click", () => { ep._showAll = true; renderDetail(); });
+  for (const c of shown) if (ep._gh?.[c.sha]) fillGitHub(c.sha, ep._gh[c.sha]);
+}
+
+function commitCard(c, repo, isRevealed) {
+  if (c.missing) return `<div class="commit"><div class="commit-head"><span><a class="mono" href="${esc(c.url)}" target="_blank" rel="noopener">${c.sha.slice(0, 10)}</a> <span class="muted">not in the mined records</span></span></div></div>`;
+  return `<div class="commit" id="c-${c.sha}">
+    <div class="commit-head">
+      <div class="commit-top">
+        <a class="mono" href="${esc(c.url)}" target="_blank" rel="noopener">${c.sha.slice(0, 10)}</a>
+        <span class="commit-msg">${esc(c.message)}</span>
+      </div>
+      <div class="commit-meta">${esc(c.date.replace("T", " ").slice(0, 16))} UTC · +${c.lines_added} −${c.lines_deleted}${isRevealed ? ` · detector: ${esc(c.author_kind)}` : ""}</div>
+      <div>${sigChips(c.added, "add")}${sigChips(c.removed, "del")}</div>
+      <div class="files">${c.files.map(f => `<a href="${esc(f.url)}" target="_blank" rel="noopener">${esc(f.path)}</a>`).join("")}</div>
+      ${meta.github ? `<div><button data-gh="${c.sha}" style="font-size:12px">GitHub details</button></div>` : ""}
+    </div>
+    <div class="gh" id="gh-${c.sha}" hidden></div>
+  </div>`;
+}
+
+async function loadGitHub(sha) {
+  const ep = current.episode;
+  ep._gh = ep._gh || {};
+  if (ep._gh[sha]) { fillGitHub(sha, ep._gh[sha]); return; }
+  const box = $(`#gh-${sha}`);
+  if (!box) return;
+  box.hidden = false; box.innerHTML = `<span class="muted">Loading from GitHub…</span>`;
+  try {
+    const data = await api(`/api/commit?repo=${encodeURIComponent(ep.repo)}&sha=${sha}`);
+    if (current.episode !== ep) return;
+    ep._gh[sha] = data;
+    fillGitHub(sha, data);
+  } catch (e) {
+    box.innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+async function loadAllGitHub() {
+  const ep = current.episode;
+  const shas = ep.commits.slice(0, ep._showAll ? undefined : COMMITS_SHOWN).filter(c => !c.missing).map(c => c.sha);
+  for (const sha of shas) { if (current.episode !== ep) return; await loadGitHub(sha); }
+}
+
+function patchHtml(file) {
+  const lines = file.lines.map(l => {
+    const t = l.t, cls = t.startsWith("@@") ? "h" : t.startsWith("+") ? "a" : t.startsWith("-") ? "r" : "";
+    const s = l.s.length ? ` s" data-s="${esc(l.s.join(", "))}` : "";
+    return `<div class="${cls}${s}">${esc(t) || " "}</div>`;
+  }).join("");
+  const more = file.truncated ? `<div class="h">… ${file.truncated} more lines; open on GitHub</div>` : "";
+  return lines ? `<div class="patch">${lines}${more}</div>` : `<div class="muted">No textual diff (binary or too large).</div>`;
+}
+
+function fillGitHub(sha, d) {
+  const box = $(`#gh-${sha}`);
+  if (!box) return;
+  box.hidden = false;
+  const author = d.author_login ? `${esc(d.author_login)}${d.author_type && d.author_type !== "User" ? ` (${esc(d.author_type)})` : ""}` : "not linked to an account";
+  const trailers = d.trailers.length ? d.trailers.map(t => `<div class="mono trailer${t.agent ? " agent" : ""}">${esc(t.text)}</div>`).join("") : `<span class="muted">none</span>`;
+  const pulls = d.pulls.length ? d.pulls.map(p => `<div class="pr">
+      <a href="${esc(p.url)}" target="_blank" rel="noopener">#${p.number} ${esc(p.title)}</a>
+      <span class="muted"> · ${esc(p.state)} · by ${esc(p.user)}${p.user_type && p.user_type !== "User" ? ` (${esc(p.user_type)})` : ""}</span>
+      ${p.body ? `<details><summary class="muted">PR description</summary><pre>${esc(p.body)}</pre></details>` : ""}
+    </div>`).join("") : `<span class="muted">No pull request found for this commit.</span>`;
+  const sig = d.files.filter(f => f.signal), other = d.files.filter(f => !f.signal);
+  const fileBlock = (f, open) => `<details ${open ? "open" : ""}><summary><span class="mono">${esc(f.path)}</span> <span class="muted">${esc(f.status)} +${f.additions} −${f.deletions}</span> <a href="${esc(f.url)}" target="_blank" rel="noopener">↗</a></summary>${patchHtml(f)}</details>`;
+  box.innerHTML = `
+    <div><b>Author</b> ${author}${d.committer_login && d.committer_login !== d.author_login ? ` · committed by ${esc(d.committer_login)}` : ""}</div>
+    <div><b>Trailers</b> ${trailers}</div>
+    <details ${d.message.includes("\n") ? "" : ""}><summary><b>Full message</b></summary><pre class="msg">${esc(d.message)}</pre></details>
+    <div><b>Pull requests</b> ${pulls}</div>
+    <div><b>Signal files</b> <span class="muted">(highlighted lines are what the detector matched)</span>${sig.map(f => fileBlock(f, true)).join("") || ` <span class="muted">none in the API response</span>`}</div>
+    ${other.length ? `<details><summary class="muted">${other.length} other changed file${other.length === 1 ? "" : "s"}</summary>${other.map(f => fileBlock(f, false)).join("")}</details>` : ""}
+  `;
+  const btn = $(`button[data-gh="${sha}"]`);
+  if (btn) btn.remove();
+}
+
+function reveal() {
+  revealed.add(current.episode.episode_id);
+  renderDetail();
+}
+
+/* ---------- form ---------- */
+function seg(col, values) {
+  const el = $(`.seg[data-col="${col}"]`);
+  el.innerHTML = values.map(v => `<button type="button" data-v="${esc(v)}">${esc(v)}</button>`).join("");
+  el.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    setValue(col, labels[col] === b.dataset.v ? "" : b.dataset.v);
+  });
+}
+function parseDep(value) {
+  const out = {};
+  for (const part of (value || "").split(";")) {
+    const [f, d] = part.split(":").map(s => (s || "").trim());
+    if (f && d) out[f] = d;
+  }
+  return out;
+}
+function buildDep() {
+  $("#dep").innerHTML = meta.deprecated_features.map(f => `
+    <div class="dep-row"><span>${esc(f)}</span><div class="seg" data-dep="${esc(f)}">
+      ${meta.dispositions.map(d => `<button type="button" data-v="${esc(d)}">${esc(d)}</button>`).join("")}
+    </div></div>`).join("");
+  $("#dep").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    const f = b.closest("[data-dep]").dataset.dep;
+    const pairs = parseDep(labels.deprecated);
+    if (pairs[f] === b.dataset.v) delete pairs[f]; else pairs[f] = b.dataset.v;
+    const value = meta.deprecated_features.filter(x => pairs[x]).map(x => `${x}:${pairs[x]}`).join(";");
+    setValue("deprecated", value);
+  });
+}
+
+function renderForm() {
+  for (const el of document.querySelectorAll(".seg[data-col]")) {
+    const col = el.dataset.col;
+    for (const b of el.children) b.classList.toggle("on", labels[col] === b.dataset.v);
+  }
+  const pairs = parseDep(labels.deprecated);
+  for (const el of document.querySelectorAll("[data-dep]")) {
+    for (const b of el.children) b.classList.toggle("on", pairs[el.dataset.dep] === b.dataset.v);
+  }
+  if (document.activeElement !== $("#notes")) $("#notes").value = labels.notes || "";
+  $("#if-correct").disabled = labels.detector_correct !== "yes";
+  renderStatus(current.status);
+  renderUndo();
+}
+
+function renderStatus(status) {
+  const el = $("#status-line");
+  el.className = `status-line ${status}`;
+  const blanks = ["end_state", "trigger", "author_kind_verified"].filter(c => !labels[c]);
+  const hasNotes = (labels.notes || "").trim() !== "";
+  el.textContent =
+    status === "done" ? "Done" :
+    status === "todo" ? "Not coded yet" :
+    labels.detector_correct === "no" ? "Incomplete: a 'no' needs a note saying why" :
+    `Incomplete: fill ${blanks.join(", ")}${hasNotes ? "" : ", or explain the blank in notes"}`;
+}
+
+function renderUndo() {
+  const el = $("#undo");
+  if (!undoSnapshot) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = `Cleared the other columns. <a href="#" id="undo-link">Undo</a>`;
+  $("#undo-link").onclick = (e) => { e.preventDefault(); labels = undoSnapshot; undoSnapshot = null; renderForm(); save(); };
+}
+
+function setValue(col, value) {
+  if (col === "detector_correct" && value !== "yes") {
+    const dependent = ["end_state", "trigger", "author_kind_verified", "deprecated"];
+    if (dependent.some(c => labels[c])) undoSnapshot = { ...labels };
+    for (const c of dependent) labels[c] = "";
+  } else if (col === "detector_correct") {
+    undoSnapshot = null;
+  }
+  labels[col] = value;
+  if (col === "detector_correct" && value && !revealed.has(current.episode.episode_id)) {
+    revealed.add(current.episode.episode_id);
+    renderDetail();
+  }
+  renderForm();
+  save();
+}
+
+function save() {
+  const id = current.episode.episode_id, body = JSON.stringify(labels);
+  const state = $("#save-state");
+  state.className = "save-state"; state.textContent = "saving…";
+  saveChain = saveChain.then(async () => {
+    try {
+      const r = await api(`/api/episode?id=${encodeURIComponent(id)}`, { method: "PUT", body });
+      if (current.episode.episode_id === id) { current.status = r.status; renderStatus(r.status); }
+      updateListRow(id, r.status);
+      state.textContent = "saved ✓";
+      refreshCounts();
+    } catch (e) {
+      state.className = "save-state error"; state.textContent = `not saved: ${e.message}`;
+    }
+  });
+  return saveChain;
+}
+
+let notesTimer = null;
+$("#notes").addEventListener("input", (e) => {
+  labels.notes = e.target.value;
+  $("#save-state").textContent = "…";
+  clearTimeout(notesTimer);
+  notesTimer = setTimeout(save, 500);
+});
+$("#notes").addEventListener("blur", () => { if (notesTimer) { clearTimeout(notesTimer); notesTimer = null; save(); } });
+
+/* ---------- navigation ---------- */
+function step(delta) {
+  const i = rows.findIndex(r => r.episode_id === current?.episode.episode_id);
+  const next = rows[Math.min(rows.length - 1, Math.max(0, i + delta))];
+  if (next) openEpisode(next.episode_id);
+}
+async function nextTodo() {
+  const all = await api("/api/episodes");
+  const i = all.findIndex(r => r.episode_id === current?.episode.episode_id);
+  const next = [...all.slice(i + 1), ...all.slice(0, i + 1)].find(r => r.status !== "done");
+  if (next) openEpisode(next.episode_id);
+}
+$("#prev").onclick = () => step(-1);
+$("#next").onclick = () => step(1);
+$("#next-todo").onclick = nextTodo;
+$("#list").addEventListener("click", (e) => { const li = e.target.closest("li[data-id]"); if (li) openEpisode(li.dataset.id); });
+let qTimer = null;
+$("#q").addEventListener("input", (e) => { clearTimeout(qTimer); qTimer = setTimeout(() => { filter.q = e.target.value; loadList(); }, 200); });
+$("#state-chips").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  for (const c of $("#state-chips").children) c.classList.toggle("on", c === b);
+  filter.state = b.dataset.state; loadList();
+});
+$("#show-detector").addEventListener("change", (e) => { store.set("show-detector", e.target.checked ? "1" : ""); renderList(); });
+$("#detail").addEventListener("click", (e) => { const b = e.target.closest("button[data-gh]"); if (b) loadGitHub(b.dataset.gh); });
+
+/* ---------- dialogs ---------- */
+for (const d of document.querySelectorAll("dialog")) {
+  d.addEventListener("click", (e) => { if (e.target === d || e.target.matches("[data-close]")) d.close(); });
+}
+$("#btn-keys").onclick = () => $("#keys").showModal();
+$("#btn-codebook").onclick = async () => {
+  $("#codebook").showModal();
+  try {
+    const resp = await fetch("/api/codebook");
+    const text = await resp.text();
+    $("#codebook-body").innerHTML = window.marked ? window.marked.parse(text) : `<pre style="white-space:pre-wrap">${esc(text)}</pre>`;
+  } catch (e) { $("#codebook-body").textContent = e.message; }
+};
+
+document.addEventListener("keydown", (e) => {
+  const typing = e.target.closest("input, textarea");
+  if (e.key === "Escape" && typing) { e.target.blur(); return; }
+  if (typing || e.metaKey || e.ctrlKey || e.altKey || document.querySelector("dialog[open]")) return;
+  const actions = {
+    j: () => step(1), k: () => step(-1), u: nextTodo,
+    y: () => setValue("detector_correct", "yes"), n: () => setValue("detector_correct", "no"),
+    g: () => meta.github && loadAllGitHub(), r: reveal,
+    o: () => current && window.open(current.episode.links.range, "_blank", "noopener"),
+    "/": () => $("#q").focus(), "?": () => $("#keys").showModal(),
+  };
+  if (actions[e.key] && current) { e.preventDefault(); actions[e.key](); }
+});
+
+/* ---------- start ---------- */
+(async function start() {
+  meta = await api("/api/meta");
+  $("#coder").textContent = `· coder ${meta.coder}`;
+  document.title = `Labeling · coder ${meta.coder}`;
+  for (const [col, values] of Object.entries(meta.allowed)) seg(col, values);
+  buildDep();
+  $("#show-detector").checked = store.get("show-detector") === "1";
+  await Promise.all([loadList(), refreshCounts()]);
+  const fromHash = decodeURIComponent(location.hash.slice(1));
+  const first = fromHash || store.get("last-episode") || rows.find(r => r.status !== "done")?.episode_id || rows[0]?.episode_id;
+  await openEpisode(first);
+})();
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js" defer></script>
+</body>
+</html>

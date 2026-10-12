@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-migration-dataset"
+version = "0.1.0"
+description = "Mining MCP server migrations across SDK majors and protocol revisions on GitHub."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "pydriller>=2.6",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "types-requests",
+    # FastAPI's TestClient, for the labeling app's tests.
+    "httpx2>=2.13.1",
+]
+# Only needed to regenerate the manuscript's figures; the dataset itself is
+# produced without it, so `search` through `stats` keep two runtime dependencies.
+paper = [
+    "matplotlib>=3.8",
+]
+# The local web app coders use to fill the labeling sheet (`mcp-migration label`).
+label = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+
+[project.scripts]
+mcp-migration = "mcp_migration.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_migration"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+# data/ holds cloned third-party repositories; it is not our code to lint.
+# Ruff would normally skip it via .gitignore, but the project is usable
+# outside a git checkout, where that inference does not apply.
+extend-exclude = ["data"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["pydriller.*"]
+ignore_missing_imports = true
+
+# matplotlib is optional and only reached from figures.py. Its numpy stubs use
+# `type` statements, which are 3.12 syntax, so analysing them fails under the
+# 3.11 floor this project supports. Skip them rather than raise the floor.
+[[tool.mypy.overrides]]
+module = ["matplotlib", "matplotlib.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

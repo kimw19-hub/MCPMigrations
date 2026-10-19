@@ -29,3 +29,6 @@ results/*
 
 # Local secrets
 .env
+
+# Manuscripts are kept locally, outside version control.
+manuscripts/

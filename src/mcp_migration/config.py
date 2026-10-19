@@ -86,6 +86,11 @@ class Paths:
         return self.root / "processed" / "episodes.jsonl"
 
     @property
+    def incidental_episodes(self) -> Path:
+        """Signal clusters the kind rules reject, kept so they can be audited."""
+        return self.root / "processed" / "episodes_incidental.jsonl"
+
+    @property
     def label_report(self) -> Path:
         """Precision and agreement computed from the coded sheets."""
         return self.root / "processed" / "label_report.json"
@@ -106,12 +111,26 @@ class Paths:
         return self.root / "processed" / "qualitative.json"
 
     @property
-    def labeling_sheet(self) -> Path:
-        return self.root / "labeling" / "sample.csv"
+    def ts_root(self) -> Path:
+        """The TypeScript mining pass, HEAD and application scans, and their manual audits."""
+        return self.root / "ts"
 
-    def coder_sheet(self, coder: str) -> Path:
-        """One coder's copy of the labeling sheet; see docs/codebook.md."""
-        return self.root / "labeling" / f"coder{coder}" / "sample.csv"
+    def labeling_round(self, round_: int) -> Path:
+        """One labeling round's directory; see data/labeling/README.md."""
+        return self.root / "labeling" / f"round{round_}"
+
+    def labeling_rounds(self) -> list[int]:
+        """The rounds that have a drawn sheet, oldest first."""
+        found = (d.name.removeprefix("round") for d in (self.root / "labeling").glob("round*"))
+        return sorted(int(n) for n in found if n.isdigit() and self.labeling_sheet(int(n)).exists())
+
+    def labeling_sheet(self, round_: int = 1) -> Path:
+        """The blank sheet drawn for a round."""
+        return self.labeling_round(round_) / "sample.csv"
+
+    def coder_sheet(self, coder: str, round_: int = 1) -> Path:
+        """One coder's copy of a round's sheet; see docs/codebook.md."""
+        return self.labeling_round(round_) / f"coder{coder}.csv"
 
     @property
     def github_cache(self) -> Path:

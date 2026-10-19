@@ -22,12 +22,25 @@ unpacked files are git-ignored; the archives are the released copy.
 | `interim/harvest_outcomes.jsonl` | `harvest` | Clone candidates not mined, and why |
 | `processed/episodes.jsonl` | `episodes` | Signal commits grouped into episodes (rebuilt by `reproduce.sh`) |
 | `processed/qualitative.json` | `qualitative` | Coded pin commits and breakage issues, with the text that fired each code |
-| `labeling/sample.csv` | `sample` | Stratified labeling sheet; coders fill the right-hand columns |
+| `labeling/round<N>/sample.csv` | `sample --round N` | One round's stratified labeling sheet; each coder fills a copy (`round<N>/coderA.csv`, `coderB.csv`). See `labeling/README.md` for the other files in a round |
 
 `mined.tar.gz` holds the `interim/` files and `search-hits.tar.gz`
 holds `raw/`. `processed/qualitative.json` is shipped rather than rebuilt,
 because rebuilding it re-reads issues that may since have been edited or
 deleted.
+
+`ts-scans.tar.gz` unpacks to `ts/` in this directory, which is where
+the protocol-support and deferral analysis (`report/measurement.py`) reads it. It holds a TypeScript
+mining pass (`interim/`), HEAD scans (`head-scan/`) and application-code scans
+of every v2 repository (`app-scan/`, with the earlier `app-scan-v1/`), and the
+manual readings that correct and validate them: `audit-labels.json` and
+`holdout-labels.json` (support calls read by hand), `legacy-only-audit.json`
+(every negative TypeScript call), `feature-marker-check.json`,
+`upgrade-claims-labels.json`, `pin-wording-check.json`,
+`issue-relevance.json`, `sampling-vignette-labels.json` and
+`history-validation.json`. The scans were run outside the committed pipeline,
+so they are shipped rather than rebuilt; the manual readings cannot be rebuilt
+at all.
 
 ## Records
 

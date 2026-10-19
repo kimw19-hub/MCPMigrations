@@ -462,13 +462,214 @@ def technical_lag(profiles: Mapping[str, Mapping[str, Any]], out: Path) -> Path:
     return out
 
 
+def protocol_support(protocol: Mapping[str, Mapping[str, Any]], out: Path) -> Path:
+    """Share of v2 repositories supporting the new revision, and with a selected
+    feature marker detected, grouped by SDK language.
+
+    Support in Python (and in repositories using both SDKs) is assigned by the
+    SDK's documented design rather than detected, so those bars are drawn hatched
+    and pale and named as such in the legend. Legacy support is not plotted:
+    the classifier's call on legacy retirement was not reliable enough to report.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    languages = [lang for lang in ("python", "typescript", "both") if lang in protocol]
+    if not languages:
+        raise ValueError("no protocol dimensions to plot")
+    labels = {"python": "Python", "typescript": "TypeScript", "both": "both SDKs"}
+    assigned = {"python", "both"}  # support follows from the SDK, not detection
+    width = 0.34
+    with plt.rc_context(_style()):
+        fig, ax = plt.subplots(figsize=(COLUMN_WIDTH_IN, 1.7))
+        for j, key in enumerate(("pct_modern", "pct_features")):
+            for i, lang in enumerate(languages):
+                row = protocol[lang]
+                y = float(row.get(key, row.get(key.replace("pct_", "pct_new_"))) or 0.0)
+                sdk = key == "pct_modern" and lang in assigned
+                ax.bar(
+                    i + (j - 0.5) * width,
+                    y,
+                    width * 0.92,
+                    color=PALETTE[j],
+                    alpha=0.35 if sdk else 1.0,
+                    hatch="////" if sdk else ("...." if j else ""),
+                    edgecolor="white" if not sdk else PALETTE[j],
+                    linewidth=0.4,
+                )
+                ax.text(
+                    i + (j - 0.5) * width,
+                    y + 1.5,
+                    f"{y:.0f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=5.5,
+                    color=INK,
+                )
+        ax.set_xticks(range(len(languages)))
+        ax.set_xticklabels(
+            [
+                f"{labels[lang]}\n(n={int(protocol[lang].get('resolved', protocol[lang]['n'])):,})"
+                for lang in languages
+            ]
+        )
+        ax.set_ylim(0, 112)
+        ax.set_yticks([0, 25, 50, 75, 100])
+        ax.set_ylabel("v2 repositories (%)")
+        ax.grid(axis="x", visible=False)
+        handles = [
+            Patch(facecolor=PALETTE[0], edgecolor="white", label="supports 2026-07-28 (detected)"),
+            Patch(
+                facecolor=PALETTE[0],
+                alpha=0.35,
+                hatch="////",
+                edgecolor=PALETTE[0],
+                label="assigned by SDK design",
+            ),
+            Patch(
+                facecolor=PALETTE[1],
+                hatch="....",
+                edgecolor="white",
+                label="selected feature marker detected",
+            ),
+        ]
+        ax.legend(
+            handles=handles,
+            frameon=False,
+            loc="lower left",
+            bbox_to_anchor=(0, 1.0),
+            ncol=2,
+            handlelength=1.4,
+            columnspacing=0.9,
+            borderaxespad=0.2,
+        )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, bbox_inches="tight")
+        plt.close(fig)
+    log.info("wrote %s", out)
+    return out
+
+
+def deferral_curves(deferral: Mapping[str, Any], out: Path) -> Path:
+    """Cumulative share moving to Python v2 after a deferring ceiling, against
+    date-matched v1 controls, with numbers at risk beneath the axis.
+
+    Kaplan-Meier step functions with their 95% bands; both clocks start on the
+    pinning date, and each curve stops where its follow-up does.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    cohorts = (
+        ("pinned", "pinned", PALETTE[4], "--"),
+        ("controls", "matched v1 control entries", PALETTE[0], "-"),
+    )
+    with plt.rc_context(_style()):
+        fig, ax = plt.subplots(figsize=(COLUMN_WIDTH_IN, 1.75))
+        for key, label, color, style in cohorts:
+            curve = (deferral.get(key) or {}).get("curve") or []
+            if not curve:
+                continue
+            days = [0] + [int(p[0]) for p in curve]
+            est = [0.0] + [float(p[1]) for p in curve]
+            low = [0.0] + [float(p[2]) for p in curve]
+            high = [0.0] + [float(p[3]) for p in curve]
+            ax.step(
+                days,
+                est,
+                where="post",
+                color=color,
+                linestyle=style,
+                linewidth=1.2,
+                label=f"{label} (n={int(deferral[key]['n']):,})",
+            )
+            ax.fill_between(days, low, high, step="post", color=color, alpha=0.15, linewidth=0)
+        ax.set_xlim(0, 45)
+        ax.set_ylim(bottom=0)
+        ax.set_xlabel("days since the pinning date (controls: their matching date)")
+        ax.set_ylabel("v2 adoption signal (%)")
+        ax.legend(frameon=False, loc="upper left")
+        # Numbers at risk beneath the axis, one row per cohort.
+        rows = (
+            ("pinned", deferral.get("risk_pinned") or []),
+            ("controls", deferral.get("risk_controls") or []),
+        )
+        for k, (name, table) in enumerate(rows):
+            y = -0.40 - 0.11 * k
+            ax.text(
+                -0.13,
+                y,
+                name,
+                transform=ax.transAxes,
+                ha="right",
+                va="center",
+                fontsize=5.5,
+                color=MUTED,
+            )
+            for entry in table:
+                if entry["day"] > 45:
+                    continue
+                ax.text(
+                    entry["day"] / 45,
+                    y,
+                    f"{entry['at_risk']:,}",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=5.5,
+                    color=INK,
+                )
+        # Header row: the day each column of numbers at risk refers to.
+        ax.text(
+            -0.13,
+            -0.29,
+            "at risk on day",
+            transform=ax.transAxes,
+            ha="right",
+            va="center",
+            fontsize=5.5,
+            color=MUTED,
+            style="italic",
+        )
+        for entry in rows[0][1]:
+            if entry["day"] <= 45:
+                ax.text(
+                    entry["day"] / 45,
+                    -0.29,
+                    str(entry["day"]),
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=5.5,
+                    color=MUTED,
+                    style="italic",
+                )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, bbox_inches="tight")
+        plt.close(fig)
+    log.info("wrote %s", out)
+    return out
+
+
 def build_all(
     episodes: Sequence[Mapping[str, Any]],
     out_dir: Path,
     lag: Mapping[str, Mapping[str, Any]] | None = None,
+    measurement: Mapping[str, Any] | None = None,
 ) -> list[Path]:
     """Generate every manuscript figure into ``out_dir``."""
     extra = [technical_lag(lag, out_dir / "technical-lag.pdf")] if lag else []
+    # RQ1 from application code where the scan exists, else the earlier view.
+    protocol = (measurement or {}).get("protocol_app") or (measurement or {}).get("protocol")
+    if protocol:
+        extra.append(protocol_support(protocol, out_dir / "protocol-support.pdf"))
+    if measurement and measurement.get("deferral"):
+        extra.append(deferral_curves(measurement["deferral"], out_dir / "deferral.pdf"))
     return [
         *extra,
         episodes_by_kind(episodes, out_dir / "episodes-by-kind.pdf"),

@@ -1,4 +1,4 @@
-"""Compare a fresh run against the outputs the paper was written from.
+"""Compare a fresh run against the expected outputs in results/expected/.
 
 Every statistic is compared, not a sample of them. The only value allowed to
 differ is the snapshot date, which records when the run happened.
@@ -54,7 +54,7 @@ def compare_summary() -> list[str]:
 
 
 def compare_numbers() -> list[str]:
-    """The macro values the paper prints, line by line."""
+    """The macro values, line by line."""
 
     def lines(path: Path) -> set[str]:
         return {
@@ -75,7 +75,7 @@ def main() -> int:
         for problem in problems:
             print("  " + problem)
         return 1
-    print("reproduced: every statistic and every number in the paper matches")
+    print("reproduced: every statistic and every number matches results/expected/")
     return 0
 
 

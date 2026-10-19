@@ -100,7 +100,10 @@ def weighted_precision(
     The interval is Wilson's on an effective sample size (Korn and Graubard,
     1998): the n at which a simple random sample would give the stratified
     estimate's variance, with a finite-population correction per stratum. Where
-    every judgement agrees the variance is zero, and the plain n is used.
+    every judgement agrees the variance is zero, and the plain n is used. The
+    effective size never exceeds the plain n either: when the only "no" verdicts
+    sit in strata with little weight, the variance nearly vanishes and the
+    interval would claim more certainty than the episodes actually judged.
     ``coverage`` is the share of the population in strata that were judged at all.
     """
     population = Counter(
@@ -131,7 +134,7 @@ def weighted_precision(
         if n_h > 1:
             variance += weight**2 * fpc * p_h * (1 - p_h) / (n_h - 1)
     n = sum(len(v) for v in judged.values())
-    n_eff = estimate * (1 - estimate) / variance if variance > 0 else float(n)
+    n_eff = min(estimate * (1 - estimate) / variance, float(n)) if variance > 0 else float(n)
     low, high = wilson_interval(round(estimate * n_eff), round(n_eff)) if n_eff >= 1 else (0.0, 1.0)
     population_total = sum(population.values()) or total
     return {
@@ -163,23 +166,169 @@ def precision_by_signal(
     return out
 
 
-def agreement(
-    sheet_a: Sequence[Mapping[str, str]],
-    sheet_b: Sequence[Mapping[str, str]],
-    columns: Iterable[str],
-) -> dict[str, float]:
-    """Cohen's kappa per column, matching rows by episode_id."""
+def invalid_rows(rows: Iterable[Mapping[str, str]]) -> list[str]:
+    """Every row the labeling app would have refused, as ``episode_id: reason``.
+
+    A sheet edited in a spreadsheet bypasses the app's checks, and a typo such as
+    ``dual_eraa`` would otherwise enter kappa as a category of its own.
+    """
+    from mcp_migration.labeling.sheet import InvalidLabel, validate
+    from mcp_migration.report.sampling import CODEBOOK_COLUMNS
+
+    problems: list[str] = []
+    for row in rows:
+        labels = {c: str(row.get(c) or "") for c in CODEBOOK_COLUMNS if c in row}
+        try:
+            validate(labels)
+        except InvalidLabel as exc:
+            problems.append(f"{row.get('episode_id', '?')}: {exc}")
+    return problems
+
+
+def _paired(
+    sheet_a: Sequence[Mapping[str, str]], sheet_b: Sequence[Mapping[str, str]]
+) -> list[tuple[Mapping[str, str], Mapping[str, str]]]:
     by_id_b = {str(r.get("episode_id", "")): r for r in sheet_b}
     paired = [
         (a, by_id_b[eid]) for a in sheet_a if (eid := str(a.get("episode_id", ""))) in by_id_b
     ]
     if not paired:
         raise ValueError("the two sheets share no episode_id values")
-    result: dict[str, float] = {}
+    return paired
+
+
+def agreement_details(
+    sheet_a: Sequence[Mapping[str, str]],
+    sheet_b: Sequence[Mapping[str, str]],
+    columns: Iterable[str],
+) -> dict[str, dict[str, float | int]]:
+    """Kappa, raw agreement and the rows behind them, per column.
+
+    ``detector_correct`` is compared wherever both coders judged the episode.
+    The other columns describe a genuine migration, so they are compared only
+    where both coders said ``yes``, and there a blank is an answer (an
+    ambiguous author, no deprecated feature touched), not a missing value.
+    Dropping one-sided blanks would discard exactly the disagreements.
+    Rows without a ``detector_correct`` value are compared as they are.
+    """
+    paired = _paired(sheet_a, sheet_b)
+    result: dict[str, dict[str, float | int]] = {}
     for column in columns:
-        left = [normalize(str(a.get(column, ""))) for a, _ in paired]
-        right = [normalize(str(b.get(column, ""))) for _, b in paired]
-        pairs = [(x, y) for x, y in zip(left, right, strict=True) if x and y]
+        pairs: list[tuple[str, str]] = []
+        for a, b in paired:
+            x, y = normalize(str(a.get(column, ""))), normalize(str(b.get(column, "")))
+            if column == "detector_correct":
+                if not (x and y):
+                    continue
+            else:
+                va = normalize(str(a.get("detector_correct", "")))
+                vb = normalize(str(b.get("detector_correct", "")))
+                if (va or vb) and not (va == vb == YES):
+                    continue
+            pairs.append((x, y))
         if pairs:
-            result[column] = cohens_kappa([x for x, _ in pairs], [y for _, y in pairs])
+            result[column] = {
+                "kappa": cohens_kappa([x for x, _ in pairs], [y for _, y in pairs]),
+                "agreement": sum(x == y for x, y in pairs) / len(pairs),
+                "n": len(pairs),
+            }
     return result
+
+
+def agreement(
+    sheet_a: Sequence[Mapping[str, str]],
+    sheet_b: Sequence[Mapping[str, str]],
+    columns: Iterable[str],
+) -> dict[str, float]:
+    """Cohen's kappa per column, matching rows by episode_id; see ``agreement_details``."""
+    return {c: float(d["kappa"]) for c, d in agreement_details(sheet_a, sheet_b, columns).items()}
+
+
+def prelabel_uptake(
+    sheet: Sequence[Mapping[str, str]],
+    prelabels: Sequence[Mapping[str, str]],
+    columns: Iterable[str],
+    skip: Iterable[str] = (),
+) -> dict[str, Any]:
+    """How much of an LLM pre-labelled sheet a verifier kept.
+
+    Assisted labeling is judged by what the human changed, not by agreement
+    between two humans who saw the same suggestion. ``skip`` drops episodes the
+    verifier coded blind, which were never shown a suggestion to keep.
+    """
+    columns = list(columns)
+    skipped = set(skip)
+    by_id = {str(r.get("episode_id", "")): r for r in prelabels}
+    rows = [r for r in sheet if str(r.get("episode_id", "")) in by_id]
+    rows = [r for r in rows if str(r.get("episode_id", "")) not in skipped]
+    changed: dict[str, int] = {}
+    episodes: set[str] = set()
+    for column in columns:
+        n = 0
+        for r in rows:
+            eid = str(r.get("episode_id", ""))
+            if normalize(str(r.get(column, ""))) != normalize(str(by_id[eid].get(column, ""))):
+                n += 1
+                episodes.add(eid)
+        changed[column] = n
+    cells = len(rows) * len(columns)
+    return {
+        "episodes": len(rows),
+        "cells": cells,
+        "cells_changed": sum(changed.values()),
+        "accepted": 1 - sum(changed.values()) / cells if cells else 0.0,
+        "episodes_changed": len(episodes),
+        "changed_by_column": changed,
+        "kappa_vs_prelabels": {
+            c: float(d["kappa"]) for c, d in agreement_details(rows, prelabels, columns).items()
+        }
+        if rows
+        else {},
+    }
+
+
+def only(rows: Iterable[Mapping[str, str]], ids: Iterable[str]) -> list[Mapping[str, str]]:
+    wanted = set(ids)
+    return [r for r in rows if str(r.get("episode_id", "")) in wanted]
+
+
+def consensus(
+    sheet_a: Sequence[Mapping[str, str]], sheet_b: Sequence[Mapping[str, str]]
+) -> tuple[list[dict[str, str]], list[str]]:
+    """One verdict per episode from two coders, and the episodes they split on.
+
+    Precision from either sheet alone would depend on which file came first. An
+    episode counts as genuine only when both coders said so; a split counts as
+    ``no`` until it is adjudicated, so the figure is a lower bound, never an
+    average of two readings.
+    """
+    rows: list[dict[str, str]] = []
+    split: list[str] = []
+    for a, b in _paired(sheet_a, sheet_b):
+        x = normalize(str(a.get("detector_correct", "")))
+        y = normalize(str(b.get("detector_correct", "")))
+        verdict = x if x == y else ("no" if x and y else "")
+        if x and y and x != y:
+            split.append(str(a.get("episode_id", "")))
+        rows.append({**a, "detector_correct": verdict})
+    return rows, split
+
+
+# Triggers in which something outside the project forced the change.
+REPAIR_TRIGGERS = ("user_issue", "bot_pr_breakage", "downstream_change")
+
+
+def coded_profile(rows: Iterable[Mapping[str, str]], kind: str) -> dict[str, Any]:
+    """What coders found in the sampled episodes of one kind.
+
+    Counts only episodes judged genuine, since the other columns are blank for
+    the rest (see docs/codebook.md).
+    """
+    sampled = [r for r in rows if str(r.get("kind", "")) == kind]
+    genuine = [r for r in sampled if normalize(str(r.get("detector_correct", ""))) == "yes"]
+    return {
+        "n_sampled": len(sampled),
+        "n": len(genuine),
+        "end_state": dict(Counter(normalize(str(r.get("end_state", ""))) for r in genuine)),
+        "trigger": dict(Counter(normalize(str(r.get("trigger", ""))) for r in genuine)),
+    }

@@ -33,7 +33,7 @@ from mcp_migration.config import (
     github_token,
     github_tokens,
 )
-from mcp_migration.mine.episodes import DEFAULT_MAX_GAP_DAYS, build_episodes
+from mcp_migration.mine.episodes import DEFAULT_MAX_GAP_DAYS, INCIDENTAL, build_episodes
 from mcp_migration.mine.history import (
     TIMEOUT_PREFIX,
     backfill_parents,
@@ -42,9 +42,13 @@ from mcp_migration.mine.history import (
 )
 from mcp_migration.models import Episode
 from mcp_migration.report.labels import (
-    agreement,
+    agreement_details,
+    consensus,
+    invalid_rows,
+    only,
     precision,
     precision_by_signal,
+    prelabel_uptake,
     read_sheet,
     weighted_precision,
 )
@@ -349,8 +353,13 @@ def cmd_episodes(args: argparse.Namespace, paths: Paths) -> int:
         head_file = paths.heads_dir / f"{commits_file.stem}.json"
         head = read_json(head_file) if head_file.exists() else None
         episodes.extend(build_episodes(read_jsonl(commits_file), head, args.max_gap_days))
-    count = write_jsonl(paths.episodes, (e.to_dict() for e in episodes))
+    kept = [e for e in episodes if e.kind != INCIDENTAL]
+    count = write_jsonl(paths.episodes, (e.to_dict() for e in kept))
+    dropped = write_jsonl(
+        paths.incidental_episodes, (e.to_dict() for e in episodes if e.kind == INCIDENTAL)
+    )
     log.info("wrote %d episodes to %s", count, paths.episodes)
+    log.info("set aside %d incidental episodes in %s", dropped, paths.incidental_episodes)
     return 0
 
 
@@ -358,9 +367,17 @@ def cmd_sample(args: argparse.Namespace, paths: Paths) -> int:
     episodes = [Episode(**record) for record in read_jsonl(paths.episodes)]
     if args.kinds:
         episodes = [e for e in episodes if e.kind in set(args.kinds)]
+    # A sheet that shaped the detector's rules cannot also measure them, so a
+    # later round draws only episodes no earlier sheet has seen.
+    seen = {str(r.get("episode_id", "")) for sheet in args.exclude or [] for r in read_sheet(sheet)}
+    if seen:
+        before = len(episodes)
+        episodes = [e for e in episodes if e.episode_id not in seen]
+        log.info("excluded %d episodes already labeled", before - len(episodes))
+    out = args.out or paths.labeling_sheet(args.round)
     sample = stratified_sample(episodes, args.per_stratum, args.seed)
-    write_labeling_sheet(paths.labeling_sheet, sample)
-    log.info("wrote %d episodes to %s", len(sample), paths.labeling_sheet)
+    write_labeling_sheet(out, sample)
+    log.info("wrote %d episodes to %s", len(sample), out)
     return 0
 
 
@@ -535,7 +552,15 @@ def cmd_figures(args: argparse.Namespace, paths: Paths) -> int:
 
     episodes = list(read_jsonl(paths.episodes))
     lag = load_lag(paths, corpus_seeds(paths))
-    for path in figures.build_all(episodes, args.out_dir, lag):
+    # The revised measurements are expensive to recompute, so read them from
+    # the summary `stats` writes; run `stats` first.
+    summary_file = args.summary or paths.root / "processed" / "summary.json"
+    measurement = read_json(summary_file).get("measurement") if summary_file.exists() else None
+    if measurement is None:
+        log.warning(
+            "no measurements in %s; the deferral and support figures are skipped", summary_file
+        )
+    for path in figures.build_all(episodes, args.out_dir, lag, measurement):
         log.info("figure: %s", path)
     return 0
 
@@ -544,22 +569,80 @@ def cmd_labels(args: argparse.Namespace, paths: Paths) -> int:
     """Report detector precision and inter-rater agreement from coded sheets."""
     from mcp_migration.report.sampling import AGREEMENT_COLUMNS
 
+    if len(args.sheets) > 2:
+        log.error("give one sheet per coder, at most two; got %d", len(args.sheets))
+        return 1
     sheets = [read_sheet(path) for path in args.sheets]
+    adjudicated = read_sheet(args.adjudicated) if args.adjudicated else None
+    named = list(zip(args.sheets, sheets, strict=True))
+    if adjudicated is not None:
+        named.append((args.adjudicated, adjudicated))
+    problems = [f"{path}: {p}" for path, rows in named for p in invalid_rows(rows)]
+    if problems:
+        for p in problems:
+            log.error("invalid label: %s", p)
+        return 1
     episodes = (
         {str(e["episode_id"]): e for e in read_jsonl(paths.episodes)}
         if paths.episodes.exists()
         else {}
     )
-    merged = sheets[0]
-    n_labeled = sum(1 for r in merged if str(r.get("detector_correct", "")).strip())
-    weighted = weighted_precision(merged, episodes)
-    overall = float(weighted.get("precision", precision(merged)))
-    by_kind = precision_by_signal(merged, episodes)
-    kappa: dict[str, float] = {}
-    if len(sheets) >= 2:
-        kappa = agreement(sheets[0], sheets[1], AGREEMENT_COLUMNS)
+    # Precision needs one verdict per episode. Taking the first sheet would make
+    # the figure depend on argument order and ignore the second coder.
+    split: list[str] = []
+    if adjudicated is not None:
+        judged, source = adjudicated, f"adjudicated ({args.adjudicated})"
+    elif len(sheets) == 2:
+        judged, split = consensus(sheets[0], sheets[1])
+        source = "both coders agree; splits count as no"
+    else:
+        judged, source = sheets[0], f"single coder ({args.sheets[0]})"
+    n_labeled = sum(1 for r in judged if str(r.get("detector_correct", "")).strip())
+    weighted = weighted_precision(judged, episodes)
+    overall = float(weighted.get("precision", precision(judged)))
+    by_kind = precision_by_signal(judged, episodes)
+    details: dict[str, dict[str, float | int]] = {}
+    if len(sheets) == 2:
+        details = agreement_details(sheets[0], sheets[1], AGREEMENT_COLUMNS)
     else:
         log.warning("only one sheet given; inter-rater agreement needs two")
+    kappa = {column: float(d["kappa"]) for column, d in details.items()}
+
+    # Assisted labeling: the coders verified LLM pre-labels. Their agreement with
+    # each other then measures shared acceptance, so report what they changed,
+    # and use the blind subset (coded without suggestions) for independence.
+    blind_ids = (
+        [ln.strip() for ln in args.blind.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if args.blind
+        else []
+    )
+    assisted: dict[str, Any] = {}
+    if args.prelabels:
+        pre = read_sheet(args.prelabels)
+        reference = judged if adjudicated is not None or len(sheets) < 2 else consensus(*sheets)[0]
+        assisted = {
+            "prelabels": str(args.prelabels),
+            "uptake": {
+                str(path): prelabel_uptake(rows, pre, AGREEMENT_COLUMNS, skip=blind_ids)
+                for path, rows in zip(args.sheets, sheets, strict=True)
+            },
+            # Against the blind subset where there is one: elsewhere the
+            # reference was itself shaped by the suggestion it is compared with.
+            "llm_vs_reference_rows": "blind" if blind_ids else "all (anchored)",
+            "llm_vs_reference": agreement_details(
+                only(reference, blind_ids) if blind_ids else reference,
+                pre,
+                AGREEMENT_COLUMNS,
+            ),
+        }
+    blind: dict[str, Any] = {}
+    if blind_ids and len(sheets) == 2:
+        blind = {
+            "n": len(blind_ids),
+            "agreement": agreement_details(
+                only(sheets[0], blind_ids), only(sheets[1], blind_ids), AGREEMENT_COLUMNS
+            ),
+        }
 
     write_json(
         args.out,
@@ -569,17 +652,59 @@ def cmd_labels(args: argparse.Namespace, paths: Paths) -> int:
             # Weighted by stratum size; the unweighted share is kept to show
             # how far equal allocation would have moved it.
             "precision_ci": [weighted.get("ci_low"), weighted.get("ci_high")],
-            "precision_unweighted": precision(merged),
+            "precision_unweighted": precision(judged),
             "coverage": weighted.get("coverage"),
             "precision_by_kind": by_kind,
+            "precision_source": source,
+            "split_episodes": split,
             "kappa": kappa,
+            "agreement": details,
+            "assisted": assisted,
+            "blind": blind,
         },
     )
-    log.info("n_labeled=%d precision=%.3f", n_labeled, overall)
+    for path, u in assisted.get("uptake", {}).items():
+        log.info(
+            "  %s kept %.1f%% of LLM pre-labels (%d of %d cells changed, %d episodes)",
+            path,
+            100 * u["accepted"],
+            u["cells_changed"],
+            u["cells"],
+            u["episodes_changed"],
+        )
+    for column, d in assisted.get("llm_vs_reference", {}).items():
+        log.info(
+            "  llm vs reference [%s] %-14s kappa=%.3f n=%d",
+            assisted["llm_vs_reference_rows"],
+            column,
+            d["kappa"],
+            d["n"],
+        )
+    for column, d in blind.get("agreement", {}).items():
+        log.info("  blind kappa %-22s %.3f  n=%d", column, d["kappa"], d["n"])
+    log.info("precision from: %s", source)
+    if split:
+        log.info("coders split on %d episodes (counted as no until adjudicated)", len(split))
+    log.info(
+        "n_labeled=%d precision=%.3f [%.3f, %.3f]",
+        n_labeled,
+        overall,
+        weighted.get("ci_low", 0.0),
+        weighted.get("ci_high", 0.0),
+    )
     for kind, stats_row in by_kind.items():
-        log.info("  %-16s n=%-4s precision=%.3f", kind, stats_row["n"], stats_row["precision"])
-    for column, value in kappa.items():
-        log.info("  kappa %-24s %.3f", column, value)
+        log.info(
+            "  %-16s n=%-4s precision=%.3f [%.3f, %.3f]",
+            kind,
+            stats_row["n"],
+            stats_row["precision"],
+            stats_row["ci_low"],
+            stats_row["ci_high"],
+        )
+    for column, d in details.items():
+        log.info(
+            "  kappa %-22s %.3f  agreement=%.3f  n=%d", column, d["kappa"], d["agreement"], d["n"]
+        )
     return 0
 
 
@@ -600,14 +725,14 @@ def cmd_label(args: argparse.Namespace, paths: Paths) -> int:
     if not paths.episodes.exists():
         log.error("no episodes at %s; run scripts/reproduce.sh first", paths.episodes)
         return 1
-    sheet = args.sheet or paths.coder_sheet(args.coder)
+    sheet = args.sheet or paths.coder_sheet(args.coder, args.round)
     if not sheet.exists():
         if args.sheet:
             log.error("no sheet at %s", sheet)
             return 1
         # Each coder starts from a copy of the shared draw, never the draw itself.
         sheet.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(paths.labeling_sheet, sheet)
+        shutil.copyfile(paths.labeling_sheet(args.round), sheet)
         log.info("started %s from the blank sheet", sheet)
 
     fetcher = None if args.offline else GitHubFetcher(paths.github_cache, github_token())
@@ -646,6 +771,8 @@ def cmd_stats(args: argparse.Namespace, paths: Paths) -> int:
         harvest_outcomes=loaded["harvest_outcomes"],
         n_search_queries=loaded["n_search_queries"],
         n_sample_size=loaded["n_sample_size"],
+        measurement=loaded["measurement"],
+        coded_pins=loaded["coded_pins"],
     )
     write_json(args.out, summary)
     log.info("wrote summary to %s", args.out)
@@ -748,6 +875,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--per-stratum", type=int, default=15)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--kinds", nargs="+", help="restrict to episode kinds, e.g. migration")
+    p.add_argument(
+        "--exclude", nargs="+", type=Path, help="labeled sheets whose episodes not to draw again"
+    )
+    p.add_argument("--round", type=int, default=1, help="labeling round the sheet is for")
+    p.add_argument(
+        "--out", type=Path, help="write here instead of data/labeling/round<N>/sample.csv"
+    )
     p.set_defaults(func=cmd_sample)
 
     p = sub.add_parser("qualitative", help="code developer text about the break")
@@ -765,16 +899,39 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_show)
 
     p = sub.add_parser("figures", help="regenerate the manuscript's figures")
-    p.add_argument("--out-dir", type=Path, default=Path("manuscripts/shared/figures"))
+    p.add_argument("--out-dir", type=Path, default=Path("results/figures"))
+    p.add_argument(
+        "--summary",
+        type=Path,
+        help="the summary `stats` wrote (default data/processed/summary.json)",
+    )
     p.set_defaults(func=cmd_figures)
 
     p = sub.add_parser("labels", help="precision and inter-rater agreement from coded sheets")
-    p.add_argument("sheets", nargs="+", type=Path, help="one coded CSV per coder")
+    p.add_argument("sheets", nargs="+", type=Path, help="one coded CSV per coder (one or two)")
+    p.add_argument(
+        "--adjudicated",
+        type=Path,
+        help="the sheet with disagreements resolved; precision is computed from it",
+    )
+    p.add_argument(
+        "--prelabels",
+        type=Path,
+        help="the LLM pre-labelled sheet the coders verified; reports what they changed",
+    )
+    p.add_argument(
+        "--blind",
+        type=Path,
+        help="episode ids (one per line) the coders labeled without seeing pre-labels",
+    )
     p.add_argument("--out", type=Path, default=Path("data/processed/label_report.json"))
     p.set_defaults(func=cmd_labels)
 
     p = sub.add_parser("label", help="code the labeling sheet in a local web app")
-    p.add_argument("--coder", required=True, help="coder letter; codes data/labeling/coder<X>/")
+    p.add_argument(
+        "--coder", required=True, help="coder letter; codes data/labeling/round<N>/coder<X>.csv"
+    )
+    p.add_argument("--round", type=int, default=1, help="labeling round to code")
     p.add_argument("--sheet", type=Path, help="code this CSV instead of the coder's own copy")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
@@ -793,7 +950,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--tex",
         type=Path,
-        default=Path("manuscripts/shared/numbers.tex"),
+        default=Path("results/numbers.tex"),
         help="LaTeX macro file consumed by paper/main.tex",
     )
     p.set_defaults(func=cmd_stats)

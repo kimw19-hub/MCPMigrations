@@ -163,3 +163,40 @@ def test_technical_lag_draws_each_cohort_to_the_end_of_its_window(tmp_path: Path
     }
     out = technical_lag(profiles, tmp_path / "lag.pdf")
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_protocol_support_and_deferral_figures_render(tmp_path: Path) -> None:
+    pytest.importorskip("matplotlib")
+    from datetime import date
+
+    from mcp_migration.report.figures import deferral_curves, protocol_support
+    from mcp_migration.report.measurement import kaplan_meier
+
+    protocol = {
+        "python": {
+            "n": 3,
+            "resolved": 3,
+            "pct_modern": 100.0,
+            "pct_legacy": 100.0,
+            "pct_new_features": 5.0,
+        },
+        "typescript": {
+            "n": 2,
+            "resolved": 2,
+            "pct_modern": 50.0,
+            "pct_legacy": 100.0,
+            "pct_new_features": 0.0,
+        },
+    }
+    start, censor = date(2026, 7, 28), date(2026, 9, 15)
+    deferral = {
+        "pinned": kaplan_meier([(start, None), (start, date(2026, 9, 1))], censor),
+        "controls": kaplan_meier([(start, date(2026, 8, 3)), (start, None)], censor),
+        "risk_pinned": [{"day": 0, "at_risk": 2, "events": 0}],
+        "risk_controls": [{"day": 0, "at_risk": 2, "events": 0}],
+    }
+    for out in (
+        protocol_support(protocol, tmp_path / "support.pdf"),
+        deferral_curves(deferral, tmp_path / "deferral.pdf"),
+    ):
+        assert out.exists() and out.stat().st_size > 0

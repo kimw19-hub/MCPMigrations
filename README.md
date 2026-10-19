@@ -1,12 +1,17 @@
 # Replication package: MCP server migrations across a breaking protocol revision
 
-This package reproduces every number and figure in the paper from the data we
-mined, and contains the pipeline that mined it. It covers MCP (Model Context
-Protocol) servers on GitHub responding to the `2026-07-28` protocol revision and
-the v2 SDKs: whether they migrate, defer or remove functionality (RQ1), whether
-upgrading the SDK amounts to migrating the protocol (RQ2), how mechanical and
-architectural changes differ (RQ3), and how long projects take to adopt each
-release (technical lag).
+This package contains the data we mined on MCP (Model Context Protocol)
+projects on GitHub responding to the `2026-07-28` protocol revision and the v2
+SDKs, the pipeline that mined it, and scripts that regenerate every statistic
+and figure from it. It covers:
+
+- **Responses to the revision:** how projects moved to the v2 SDKs or deferred
+  with a version ceiling, and whether deferring projects later adopted v2.
+- **Protocol support:** what v2 SDK adoption establishes, from application
+  code, about support for the new revision and use of its features.
+- **Migration episodes:** a dataset of episodes mined from commit histories,
+  with LLM-assisted, human-verified labeled samples that measure the
+  extraction's precision.
 
 ## Contents
 
@@ -18,15 +23,16 @@ release (technical lag).
 | `docs/codebook.md` | The manual labeling codebook |
 | `data/mined.tar.gz` | Everything mined: metadata, signal commits, HEAD states, harvest outcomes (44 MB) |
 | `data/search-hits.tar.gz` | Raw GitHub search hits, per query (7 MB) |
+| `data/ts-scans.tar.gz` | TypeScript mining pass, HEAD and application scans of v2 repositories, and the manual audits of protocol support (5 MB); unpacks to `data/ts/` |
 | `data/external/mcpcorpus_repos.txt` | Repository list derived from MCPCorpus, the cohort for technical lag |
-| `data/labeling/sample.csv` | The stratified labeling sheet (520 episodes) |
+| `data/labeling/round<N>/` | Each labeling round: the draw, LLM pre-labels, both coders' sheets, the adjudicated sheet ([layout](data/labeling/README.md)) |
 | `data/processed/qualitative.json` | Coded developer text: pin commits and breakage issues, with evidence |
-| `results/expected/` | The outputs the paper was written from |
+| `results/expected/` | The expected outputs `reproduce.sh` checks against |
 | `scripts/reproduce.sh` | Regenerates everything and checks it against `results/expected/` |
 
 `data/README.md` documents every data file and its fields.
 
-## Reproducing the paper
+## Reproducing the results
 
 Requires Python 3.11 or later. No GitHub access or token is needed.
 
@@ -41,13 +47,13 @@ recomputes every statistic and figure, and compares them with
 `results/expected/`. It finishes with:
 
 ```
-reproduced: every statistic and every number in the paper matches
+reproduced: every statistic and every number matches results/expected/
 ```
 
 It takes a few minutes. Outputs go to `results/`:
 
 - `results/summary.json`: every statistic, as JSON
-- `results/numbers.tex`: every number the paper prints, as LaTeX macros
+- `results/numbers.tex`: every statistic, as LaTeX macros
 - `results/figures/*.pdf`: every data figure
 
 Run the tests with `pytest`.
@@ -59,25 +65,58 @@ All keys refer to `results/summary.json`.
 | Result | Keys | Figure |
 |---|---|---|
 | Corpus construction (pipeline figure) | `n_search_queries`, `n_seed_repos`, `n_resolved_repos`, `n_clone_candidates`, `exclusion`, `harvest`, `n_mined_repos`, `n_signal_commits`, `n_episodes`, `n_sample_size` | |
-| RQ1: migrate, defer or remove | `episode_kinds`, `n_pinned_repos`, `n_pinned_later_moved`, `qualitative` | `episodes-by-kind.pdf`, `kind-by-era.pdf` |
-| RQ2: SDK upgrade versus protocol migration | `migration_end_states`, `head_eras` | `migration-end-states.pdf` |
-| RQ3: mechanical versus architectural change | `deprecated_removed`, `replacements` | |
+| Responses to the revision and deferral | `measurement.responses`, `measurement.deferral*`, `measurement.pin_wording`, `measurement.issue_themes`, `coded_pins` | `deferral.pdf` |
+| Protocol support and features | `measurement.protocol_app*`, `measurement.legacy_audit`, `measurement.holdout`, `measurement.feature_check`, `measurement.upgrade_claims_manual` | `protocol-support.pdf` |
+| History reconstruction check | `measurement.history_validation` | |
+| Episodes by kind and end state | `episode_kinds`, `head_eras`, `migration_end_states`, `deprecated_removed`, `replacements` | `episodes-by-kind.pdf`, `kind-by-era.pdf`, `migration-end-states.pdf` |
 | Technical lag | `technical_lag`, `technical_lag_repos`; `technical_lag_all` shows the whole-dataset contrast | `technical-lag.pdf` |
 | Revision uptake and authorship | `revisions_added`, `n_agent_episodes`, `n_bot_episodes` | `revision-adoption.pdf`, `author-kind-share.pdf` |
 | Episode-boundary sensitivity | `gap_sensitivity` | |
 | Size cap | `repo_size`, `exclusion` | |
 | Detector precision and agreement | `labels` | |
 
-**Precision and agreement.** These come from the two coders' sheets, in
-`data/labeling/coderA/` and `data/labeling/coderB/`:
+**Precision and agreement.** Labeling is LLM-assisted. Claude Opus 5.5 (in
+Claude Code) pre-labels each sampled episode under the codebook. Two coders
+verify every label independently, and disagreements are adjudicated. Each round
+also has a blind subset that both coders code without pre-labels. The
+protocol, the prompt for each round, the prompt changelog and the reporting
+rules are in [`docs/llm-labeling/`](docs/llm-labeling/README.md). The sheets
+are listed in [`data/labeling/README.md`](data/labeling/README.md).
+
+For an assisted round, `labels --prelabels` reports the share of pre-labels
+each coder kept, and `--blind` reports kappa on the blind subset. The figures
+come from the two coders' sheets:
 
 ```bash
-mcp-migration labels data/labeling/coderA/sample.csv data/labeling/coderB/sample.csv
+mcp-migration labels data/labeling/round1/coderA.csv data/labeling/round1/coderB.csv \
+  --prelabels data/labeling/round1/llm/coderLLM.csv \
+  --adjudicated data/labeling/round1/adjudicated.csv
 ```
 
 The sample is stratified with 15 episodes per (kind × end state) cell. Precision
 is weighted by each cell's share of the episodes, and the interval is Wilson's at
 the matching effective sample size (`src/mcp_migration/report/labels.py`).
+
+`episodes` writes clusters that show no migration decision to
+`data/processed/episodes_incidental.jsonl` instead of `episodes.jsonl`. These
+are a v1 removal with no switch to standalone FastMCP, a revision literal that
+only appears, and an `MCPError` with no other v2 signal. Episode ids do not
+change. The first coded round shaped these rules, so precision is measured on a
+second round drawn without it:
+
+```bash
+mcp-migration sample --kinds revision_change v1_removal migration v2_adoption \
+  --exclude data/labeling/round1/sample.csv --round 2
+mcp-migration label --coder A --round 2
+```
+
+Both sheets are checked against the codebook first, and an invalid value stops
+the run. Precision counts an episode as genuine only when both coders said
+`yes`. An episode the coders split on counts as `no` and is listed under
+`split_episodes`. Once the splits are resolved, pass that sheet with
+`--adjudicated PATH` and precision is taken from it. Kappa for
+`detector_correct` covers every episode. The other columns are compared only
+where both coders said `yes`, and a blank counts as an answer there.
 
 The sheets were coded in a local web app, `mcp-migration label --coder A`
 (install with `pip install -e ".[label]"`). It edits a coder's own sheet in
@@ -108,8 +147,8 @@ It yields the same records and is faster on repositories with long histories.
 
 ## Citing
 
-If you use this package, please cite the paper; `CITATION.cff` has the details,
-and GitHub's "Cite this repository" button reads it.
+If you use this package, please cite it; `CITATION.cff` has the details, and
+GitHub's "Cite this repository" button reads it.
 
 ## License
 

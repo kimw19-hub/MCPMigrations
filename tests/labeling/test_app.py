@@ -77,7 +77,7 @@ def client(tmp_path: Path) -> TestClient:
             commit(SHA2, SHA1, "Drop FastMCP", "2026-08-03T10:00:00+00:00"),
         ],
     )
-    sheet = tmp_path / "labeling" / "coderA" / "sample.csv"
+    sheet = tmp_path / "labeling" / "round1" / "coderA.csv"
     sheet.parent.mkdir(parents=True)
     sheet.write_text(
         "episode_id,repo,kind,start,end,n_commits,head_static_era,first_commit_url,"

@@ -34,7 +34,7 @@ DEFAULT_PUSHED_AFTER = date(2024, 11, 1)
 # reversible with --max-disk-kb; individual repositories can be forced back in
 # via Criteria.keep. It was 100 MB until the harvest made storage moot.
 #
-# `report.stats.size_profile` recomputes these figures for the manuscripts, so
+# `report.stats.size_profile` recomputes these figures in the summary, so
 # do not restate them there by hand.
 DEFAULT_MAX_DISK_KB = 2_000_000  # 2 GB
 

@@ -111,6 +111,27 @@ def test_generated_macros_are_declared_in_the_paper_defaults(repo_root: Path) ->
             "pins": {"n": 4, "breakage": 2, "temporary": 1},
             "issues": {"n": 2, **dict.fromkeys(ISSUE_THEMES, 1)},
         },
+        label_report={
+            "n_labeled": 4,
+            "precision_overall": 0.5,
+            "kappa": {"detector_correct": 0.9},
+            "assisted": {
+                "uptake": {"a.csv": {"accepted": 0.98, "cells_changed": 3}},
+                "llm_vs_reference": {"detector_correct": {"kappa": 0.95}},
+            },
+            "blind": {"n": 2, "agreement": {"detector_correct": {"kappa": 0.8}}},
+            "precision_source": "adjudicated (round2/adjudicated.csv)",
+            "precision_by_kind": {
+                "migration": {"n": 5, "precision": 0.9, "ci_low": 0.6, "ci_high": 0.98},
+                "v2_adoption": {"n": 5, "precision": 0.8, "ci_low": 0.5, "ci_high": 0.95},
+            },
+        },
+        coded_pins={
+            "n_sampled": 3,
+            "n": 2,
+            "end_state": {"pinned_below_2": 2},
+            "trigger": {"downstream_change": 1, "proactive": 1},
+        },
     )
     generated = set(re.findall(r"\\def\\(\w+)\{", to_latex(summary)))
     assert generated <= declared, f"undeclared macros: {sorted(generated - declared)}"
@@ -432,3 +453,47 @@ def test_harvest_outcomes_become_counts_and_the_budget_actually_applied() -> Non
     assert "\\def\\nHarvestUnavailable{1}" in tex
     assert "\\def\\nHarvestTimeout{2}" in tex
     assert "\\def\\minHarvestBudget{30}" in tex
+
+
+def test_measurement_macros_carry_intervals_and_leave_gaps_unfilled() -> None:
+    from mcp_migration.report.stats import _measurement_macros
+
+    km = {"n": 800, "events": 3, "by_day": {30: {"pct": 0.3, "ci_low": 0.0, "ci_high": 0.8}}}
+    m = {
+        "deferral": {
+            "pinned": km,
+            "controls": None,
+            "scopes": {"deferral": 5, "v2_same_commit": 2, "v2_already_present": 1},
+        },
+        "protocol": {
+            "typescript": {
+                "n": 10,
+                "resolved": 4,
+                "pct_modern": 75.0,
+                "pct_legacy": None,
+                "pct_new_features": 20.0,
+            }
+        },
+    }
+    out = _measurement_macros(m)
+    assert out["pctDefPinned"] == "0.3" and out["pctDefPinnedHigh"] == "0.8"
+    assert "nDefUnpinned" not in out  # absent cohort renders as [??], not 0
+    assert out["nCeilCommits"] == "8" and out["nCeilDeferral"] == "5"
+    assert out["nCeilSameCommit"] == "2" and out["nCeilAlready"] == "1"
+    assert out["nTsResolved"] == "4" and out["pctTsModern"] == "75.0"
+    assert "pctTsLegacy" not in out
+
+
+def test_held_out_precision_needs_a_blind_subset_and_an_adjudicated_sheet() -> None:
+    """Round 1 has no blind subset, so it must never fill the held-out macros."""
+    by_kind = {"migration": {"n": 5, "precision": 0.9, "ci_low": 0.6, "ci_high": 0.98}}
+    base = {"n_labeled": 5, "precision_overall": 0.9, "precision_by_kind": by_kind}
+    adjudicated = {"precision_source": "adjudicated (x.csv)"}
+    blind = {"blind": {"n": 2}}
+    for report, filled in (
+        ({**base, **adjudicated}, False),  # round 1: adjudicated, no blind subset
+        ({**base, **blind, "precision_source": "consensus"}, False),  # before adjudication
+        ({**base, **blind, **adjudicated}, True),
+    ):
+        tex = to_latex(summarize([], [], label_report=report))
+        assert ("\\def\\precHeldOutMigration{0.90}" in tex) is filled

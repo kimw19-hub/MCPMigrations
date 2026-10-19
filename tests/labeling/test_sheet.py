@@ -128,3 +128,16 @@ def test_a_sheet_without_the_coded_columns_is_refused(tmp_path: Path) -> None:
     path.write_text("episode_id,repo\na/b#0,a/b\n", encoding="utf-8")
     with pytest.raises(ValueError, match="detector_correct"):
         Sheet(path)
+
+
+def test_each_round_keeps_its_draw_and_coder_sheets_together(tmp_path: Path) -> None:
+    from mcp_migration.config import Paths
+
+    paths = Paths(tmp_path)
+    assert paths.labeling_sheet(2) == tmp_path / "labeling" / "round2" / "sample.csv"
+    assert paths.coder_sheet("A", 2) == tmp_path / "labeling" / "round2" / "coderA.csv"
+    for n in (2, 1):
+        paths.labeling_round(n).mkdir(parents=True)
+        write_sheet(paths.labeling_sheet(n), ["a/b#0"])
+    (tmp_path / "labeling" / "round3").mkdir()  # no draw yet, so not a round
+    assert paths.labeling_rounds() == [1, 2]

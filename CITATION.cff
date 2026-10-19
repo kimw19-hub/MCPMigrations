@@ -1,20 +1,18 @@
-# Anonymised for double-anonymous review. After acceptance: replace the authors
-# with real names (and ORCIDs), add repository-code and a DOI, and complete the
-# preferred citation with the proceedings details.
+# Anonymised for now. Before release: replace the authors with real names (and
+# ORCIDs), and add repository-code and a DOI.
 cff-version: 1.2.0
 message: >-
-  If you use this replication package, please cite the paper below. The
-  software and data are also citable on their own using this file.
+  If you use this software or data, please cite it using these metadata.
 type: software
 title: >-
-  Replication package for "Upgrading Is Not Migrating: Responses to the
-  Model Context Protocol's First Breaking Change"
+  MCP migrations: Model Context Protocol projects across a breaking protocol
+  revision
 abstract: >-
   Pipeline and data for a study of MCP (Model Context Protocol) servers on
   GitHub responding to the 2026-07-28 protocol revision and the v2 SDKs:
-  migration episodes mined from 32,939 repositories, a stratified labeling
-  sample, coded developer text, and scripts that regenerate every number and
-  figure in the paper.
+  migration episodes mined from 32,939 repositories, LLM-assisted and
+  human-verified labeling samples, coded developer text, and scripts that
+  regenerate every statistic and figure.
 authors:
   - name: Anonymous authors
 version: 0.1.0
@@ -29,16 +27,3 @@ keywords:
   - software evolution
   - mining software repositories
   - technical lag
-preferred-citation:
-  type: conference-paper
-  title: >-
-    Upgrading Is Not Migrating: Responses to the Model Context Protocol's
-    First Breaking Change
-  authors:
-    - name: Anonymous authors
-  collection-title: >-
-    Proceedings of the IEEE International Conference on Software Analysis,
-    Evolution and Reengineering (SANER)
-  conference:
-    name: IEEE International Conference on Software Analysis, Evolution and Reengineering (SANER 2027)
-  year: 2027

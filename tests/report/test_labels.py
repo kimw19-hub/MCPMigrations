@@ -315,3 +315,226 @@ def test_per_kind_precision_weights_eras_within_the_kind() -> None:
     rows = _judged("migration", "big", ["yes"] * 4) + _judged("migration", "small", ["no"] * 4)
     by_kind = precision_by_signal(rows, episodes)
     assert round(float(by_kind["migration"]["precision"]), 3) == 0.8
+
+
+def _coded(eid: str, verdict: str, **labels: str) -> dict[str, str]:
+    return {"episode_id": eid, "detector_correct": verdict, **labels}
+
+
+def test_dependent_columns_count_a_one_sided_blank_as_disagreement() -> None:
+    """A blank author is an answer; dropping it hid every author disagreement."""
+    from mcp_migration.report.labels import agreement_details
+
+    a = [
+        _coded("x", "yes", author_kind_verified=""),
+        _coded("y", "yes", author_kind_verified="bot"),
+    ]
+    b = [
+        _coded("x", "yes", author_kind_verified="human"),
+        _coded("y", "yes", author_kind_verified="bot"),
+    ]
+    d = agreement_details(a, b, ["author_kind_verified"])["author_kind_verified"]
+    assert d["n"] == 2
+    assert d["agreement"] == 0.5
+    assert d["kappa"] < 1.0
+
+
+def test_dependent_columns_are_compared_only_where_both_coders_said_yes() -> None:
+    from mcp_migration.report.labels import agreement_details
+
+    a = [
+        _coded("x", "yes", trigger="proactive"),
+        _coded("y", "no"),
+        _coded("z", "yes", trigger="unknown"),
+    ]
+    b = [_coded("x", "yes", trigger="proactive"), _coded("y", "no"), _coded("z", "no")]
+    d = agreement_details(a, b, ["detector_correct", "trigger"])
+    assert d["detector_correct"]["n"] == 3
+    assert d["trigger"]["n"] == 1
+
+
+def test_consensus_does_not_depend_on_sheet_order() -> None:
+    from mcp_migration.report.labels import consensus
+
+    a = [_coded("x", "yes"), _coded("y", "yes"), _coded("z", "no")]
+    b = [_coded("x", "yes"), _coded("y", "no"), _coded("z", "no")]
+    ab, split_ab = consensus(a, b)
+    ba, split_ba = consensus(b, a)
+    verdicts = lambda rows: {r["episode_id"]: r["detector_correct"] for r in rows}  # noqa: E731
+    assert verdicts(ab) == verdicts(ba) == {"x": "yes", "y": "no", "z": "no"}
+    assert split_ab == split_ba == ["y"]
+
+
+def test_invalid_rows_catch_typos_and_labels_on_rejected_episodes() -> None:
+    from mcp_migration.report.labels import invalid_rows
+
+    rows = [
+        _coded("ok", "yes", end_state="dual_era", trigger="proactive", author_kind_verified=""),
+        _coded("typo", "yes", end_state="dual_eraa", trigger="proactive", author_kind_verified=""),
+        _coded("stray", "no", end_state="", trigger="", author_kind_verified="bot"),
+    ]
+    problems = invalid_rows(rows)
+    assert [p.split(":")[0] for p in problems] == ["typo", "stray"]
+
+
+def _write_sheet(path: Path, rows: list[dict[str, str]]) -> Path:
+    from mcp_migration.report.sampling import CODEBOOK_COLUMNS
+
+    fields = ["episode_id", *[c for c in CODEBOOK_COLUMNS if c != "notes"]]
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({f: row.get(f, "") for f in fields})
+    return path
+
+
+def test_labels_command_refuses_an_invalid_sheet(tmp_path: Path) -> None:
+    from mcp_migration.cli import main
+
+    a = _write_sheet(tmp_path / "a.csv", [_coded("x#0", "no", author_kind_verified="bot")])
+    b = _write_sheet(tmp_path / "b.csv", [_coded("x#0", "no")])
+    out = tmp_path / "report.json"
+    assert main(["--data-dir", str(tmp_path), "labels", str(a), str(b), "--out", str(out)]) == 1
+    assert not out.exists()
+
+
+def test_labels_command_precision_ignores_argument_order(tmp_path: Path) -> None:
+    from mcp_migration.cli import main
+
+    yes = dict(end_state="still_v1", trigger="proactive")
+    a = _write_sheet(tmp_path / "a.csv", [_coded("x#0", "yes", **yes), _coded("y#0", "yes", **yes)])
+    b = _write_sheet(tmp_path / "b.csv", [_coded("x#0", "yes", **yes), _coded("y#0", "no")])
+    reports = []
+    for order in ((a, b), (b, a)):
+        out = tmp_path / "report.json"
+        assert (
+            main(["--data-dir", str(tmp_path), "labels", *map(str, order), "--out", str(out)]) == 0
+        )
+        reports.append(json.loads(out.read_text()))
+    assert reports[0]["precision_overall"] == reports[1]["precision_overall"] == 0.5
+    assert reports[0]["split_episodes"] == ["y#0"]
+    assert reports[0]["agreement"]["detector_correct"]["n"] == 2
+
+
+def test_labels_command_takes_precision_from_the_adjudicated_sheet(tmp_path: Path) -> None:
+    from mcp_migration.cli import main
+
+    yes = dict(end_state="still_v1", trigger="proactive")
+    a = _write_sheet(tmp_path / "a.csv", [_coded("x#0", "yes", **yes)])
+    b = _write_sheet(tmp_path / "b.csv", [_coded("x#0", "no")])
+    adj = _write_sheet(tmp_path / "adj.csv", [_coded("x#0", "yes", **yes)])
+    out = tmp_path / "report.json"
+    args = ["--data-dir", str(tmp_path), "labels", str(a), str(b), "--adjudicated", str(adj)]
+    assert main([*args, "--out", str(out)]) == 0
+    report = json.loads(out.read_text())
+    assert report["precision_overall"] == 1.0
+    assert report["precision_source"].startswith("adjudicated")
+
+
+def test_sample_never_redraws_an_episode_an_earlier_sheet_labeled(tmp_path: Path) -> None:
+    """Episodes that shaped the rules cannot also measure them."""
+    from mcp_migration.cli import main
+
+    data = tmp_path / "data"
+    (data / "processed").mkdir(parents=True)
+    base = {
+        "repo": "a/b",
+        "kind": "revision_change",
+        "scope": "protocol_only",
+        "start": "2026-08-01T00:00:00+00:00",
+        "end": "2026-08-01T00:00:00+00:00",
+        "duration_days": 0,
+        "shas": ["abc"],
+        "lines_added": 1,
+        "lines_deleted": 0,
+        "author_kinds": ["human_or_unknown"],
+        "deprecated_removed": [],
+        "revisions_added": [],
+        "revisions_removed": [],
+        "replacements": [],
+        "head_static_era": "sdk_v1",
+    }
+    with (data / "processed" / "episodes.jsonl").open("w", encoding="utf-8") as fh:
+        for i in range(4):
+            fh.write(json.dumps({**base, "episode_id": f"a/b#{i}"}) + "\n")
+    earlier = _write_sheet(tmp_path / "round1.csv", [_coded("a/b#0", "no"), _coded("a/b#1", "no")])
+    out = tmp_path / "round2.csv"
+    args = ["--data-dir", str(data), "sample", "--per-stratum", "10"]
+    assert main([*args, "--exclude", str(earlier), "--out", str(out)]) == 0
+    assert sorted(r["episode_id"] for r in read_sheet(out)) == ["a/b#2", "a/b#3"]
+
+
+def test_prelabel_uptake_counts_changed_cells_and_skips_blind_episodes() -> None:
+    from mcp_migration.report.labels import prelabel_uptake
+
+    pre = [_coded("x", "yes", trigger="proactive"), _coded("y", "yes", trigger="unknown")]
+    sheet = [_coded("x", "yes", trigger="user_issue"), _coded("y", "no")]
+    u = prelabel_uptake(sheet, pre, ["detector_correct", "trigger"])
+    assert u["cells"] == 4
+    assert u["cells_changed"] == 3  # x.trigger, y.detector, y.trigger
+    assert u["episodes_changed"] == 2
+    blind = prelabel_uptake(sheet, pre, ["detector_correct", "trigger"], skip=["y"])
+    assert blind["cells"] == 2 and blind["cells_changed"] == 1
+
+
+def test_labels_command_reports_uptake_and_blind_agreement(tmp_path: Path) -> None:
+    from mcp_migration.cli import main
+
+    yes = dict(end_state="still_v1", trigger="proactive")
+    pre = _write_sheet(
+        tmp_path / "llm.csv", [_coded("x#0", "yes", **yes), _coded("y#0", "yes", **yes)]
+    )
+    a = _write_sheet(tmp_path / "a.csv", [_coded("x#0", "yes", **yes), _coded("y#0", "no")])
+    b = _write_sheet(tmp_path / "b.csv", [_coded("x#0", "yes", **yes), _coded("y#0", "no")])
+    blind = tmp_path / "blind.txt"
+    blind.write_text("y#0\n", encoding="utf-8")
+    out = tmp_path / "report.json"
+    args = ["--data-dir", str(tmp_path), "labels", str(a), str(b), "--prelabels", str(pre)]
+    assert main([*args, "--blind", str(blind), "--out", str(out)]) == 0
+    report = json.loads(out.read_text())
+    uptake = report["assisted"]["uptake"][str(a)]
+    assert uptake["episodes"] == 1 and uptake["accepted"] == 1.0  # the blind one is skipped
+    assert report["assisted"]["llm_vs_reference_rows"] == "blind"
+    assert report["blind"]["n"] == 1
+
+
+def test_the_coded_profile_counts_only_genuine_episodes_of_the_kind() -> None:
+    from mcp_migration.report.labels import coded_profile
+
+    rows = [
+        {
+            "kind": "pin_below_2",
+            "detector_correct": "yes",
+            "end_state": "pinned_below_2",
+            "trigger": "downstream_change",
+        },
+        {"kind": "pin_below_2", "detector_correct": "no", "end_state": "", "trigger": ""},
+        {
+            "kind": "migration",
+            "detector_correct": "yes",
+            "end_state": "sdk_v2_default",
+            "trigger": "proactive",
+        },
+    ]
+    profile = coded_profile(rows, "pin_below_2")
+    assert profile == {
+        "n_sampled": 2,
+        "n": 1,
+        "end_state": {"pinned_below_2": 1},
+        "trigger": {"downstream_change": 1},
+    }
+
+
+def test_the_interval_never_claims_more_than_the_episodes_judged() -> None:
+    """One "no" in a tiny stratum must not shrink the interval to nothing."""
+    from mcp_migration.report.labels import weighted_precision
+
+    episodes = {f"big#{i}": {"kind": "m", "head_static_era": "a"} for i in range(10_000)}
+    episodes |= {f"small#{i}": {"kind": "m", "head_static_era": "b"} for i in range(10)}
+    rows = [{"episode_id": f"big#{i}", "detector_correct": "yes"} for i in range(20)]
+    rows += [{"episode_id": "small#0", "detector_correct": "no"}]
+    rows += [{"episode_id": f"small#{i}", "detector_correct": "yes"} for i in range(1, 5)]
+    result = weighted_precision(rows, episodes)
+    assert result["n_effective"] <= result["n"] == 25
+    assert result["ci_high"] - result["ci_low"] > 0.05

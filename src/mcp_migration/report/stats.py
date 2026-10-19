@@ -106,6 +106,8 @@ def summarize(
     harvest_outcomes: Sequence[Mapping[str, Any]] | None = None,
     n_search_queries: int = 0,
     n_sample_size: int = 0,
+    measurement: Mapping[str, Any] | None = None,
+    coded_pins: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compute every statistic the manuscript cites."""
     kinds = Counter(str(e["kind"]) for e in episodes)
@@ -165,7 +167,269 @@ def summarize(
         "harvest": harvest_profile(harvest_outcomes or []),
         "n_search_queries": n_search_queries,
         "n_sample_size": n_sample_size,
+        "measurement": dict(measurement or {}),
+        "coded_pins": dict(coded_pins or {}),
     }
+
+
+def _measurement_macros(m: Mapping[str, Any]) -> dict[str, str]:
+    """Macros for the revised measurements; absent blocks render as [??]."""
+    out: dict[str, str] = {}
+
+    def km(prefix: str, entry: Mapping[str, Any] | None) -> None:
+        if not entry:
+            return
+        out["n" + prefix] = _fmt(int(entry["n"]))
+        out["nEvents" + prefix] = _fmt(int(entry["events"]))
+        by_day = entry.get("by_day") or {}
+        for day, word in ((30, ""), (45, "FortyFive")):
+            at = by_day.get(day) or by_day.get(str(day))
+            if at:
+                out["pct" + prefix + word] = f"{at['pct']:.1f}"
+                out["pct" + prefix + word + "Low"] = f"{at['ci_low']:.1f}"
+                out["pct" + prefix + word + "High"] = f"{at['ci_high']:.1f}"
+
+    for block, suffix in (
+        ("deferral", ""),
+        ("deferral_corpus", "Corpus"),
+        ("deferral_agent", "Agent"),
+        ("deferral_no_agent", "NoAgent"),
+        ("deferral_same_day_excluded", "NoSameDay"),
+        ("deferral_unmatched", "Unmatched"),
+        ("deferral_censor_controls", "CensorControls"),
+        ("deferral_no_reuse", "NoReuse"),
+    ):
+        d = m.get(block) or {}
+        km("DefPinned" + suffix, d.get("pinned"))
+        km("DefUnpinned" + suffix, d.get("controls") or d.get("unpinned_v1"))
+        # Pinned minus controls at day 30, in percentage points, per analysis.
+        if f"pctDefPinned{suffix}" in out and f"pctDefUnpinned{suffix}" in out:
+            gap = float(out[f"pctDefPinned{suffix}"]) - float(out[f"pctDefUnpinned{suffix}"])
+            out[f"pctDefGap{suffix}"] = f"{gap:.1f}"
+    scopes = (m.get("deferral") or {}).get("scopes") or {}
+    if scopes:
+        out["nCeilCommits"] = _fmt(sum(int(v) for v in scopes.values()))
+        out["nCeilSameCommit"] = _fmt(int(scopes.get("v2_same_commit", 0)))
+        out["nCeilAlready"] = _fmt(int(scopes.get("v2_already_present", 0)))
+        out["nCeilDeferral"] = _fmt(int(scopes.get("deferral", 0)))
+    same_day = (m.get("deferral_same_day_excluded") or {}).get("scopes") or {}
+    if same_day:
+        out["nCeilSameDayVTwo"] = _fmt(int(same_day.get("same_day_v2", 0)))
+    if (m.get("deferral") or {}).get("controls_per_pin"):
+        out["nControlsPerPin"] = _fmt(int(m["deferral"]["controls_per_pin"]))
+    matching = (m.get("deferral") or {}).get("matching") or {}
+    for key, macro in (
+        ("control_entries", "nControlEntries"),
+        ("distinct_controls", "nDistinctControls"),
+        ("max_reuse", "nMaxReuse"),
+        ("short_sets", "nShortSets"),
+        ("controls_later_pinned", "nControlsLaterPinned"),
+        ("pool", "nControlPool"),
+    ):
+        if matching.get(key) is not None:
+            out[macro] = _fmt(int(matching[key]))
+    for key, macro in (
+        ("prior_signal_commits_median_pinned", "nPriorPinned"),
+        ("prior_signal_commits_median_controls", "nPriorControls"),
+    ):
+        if matching.get(key) is not None:
+            out[macro] = f"{float(matching[key]):g}"
+    clustered = (m.get("deferral") or {}).get("clustered_30") or {}
+    for key, word in (("pinned", "Pinned"), ("controls", "Controls"), ("gap", "Gap")):
+        entry = clustered.get(key)
+        if entry:
+            out[f"pctClust{word}"] = f"{entry['pct']:.1f}"
+            out[f"pctClust{word}Low"] = f"{entry['ci_low']:.1f}"
+            out[f"pctClust{word}High"] = f"{entry['ci_high']:.1f}"
+    if clustered.get("repositories"):
+        out["nClustRepos"] = _fmt(int(clustered["repositories"]["pct"]))
+    flow = m.get("cohort_flow") or {}
+    if flow.get("pinned"):
+        out["nFlowPinned"] = _fmt(int(flow["pinned"]))
+        out["nFlowInCohort"] = _fmt(int(flow["pinned_in_release_cohort"]))
+    diff = (m.get("deferral") or {}).get("difference_30") or {}
+    if diff:
+        out["pctDiffThirty"] = f"{diff['pct']:.1f}"
+        out["pctDiffThirtyLow"] = f"{diff['ci_low']:.1f}"
+        out["pctDiffThirtyHigh"] = f"{diff['ci_high']:.1f}"
+        out["nBootReps"] = _fmt(int(diff["reps"]))
+    for block, suffix in (("protocol", ""), ("protocol_corpus", "Corpus")):
+        for lang, tag in (("python", "Py"), ("typescript", "Ts"), ("both", "Both")):
+            row = (m.get(block) or {}).get(lang)
+            if not row:
+                continue
+            out[f"n{tag}VTwo{suffix}"] = _fmt(int(row["n"]))
+            out[f"n{tag}Resolved{suffix}"] = _fmt(int(row["resolved"]))
+            for key, name in (
+                ("pct_modern", "Modern"),
+                ("pct_legacy", "Legacy"),
+                ("pct_new_features", "NewFeatures"),
+            ):
+                if row.get(key) is not None:
+                    out[f"pct{tag}{name}{suffix}"] = f"{float(row[key]):.1f}"
+    ts_row = (m.get("protocol") or {}).get("typescript") or {}
+    if ts_row.get("pct_modern") is not None:
+        out["pctTsLegacyOnly"] = f"{100 - float(ts_row['pct_modern']):.1f}"
+    claims = m.get("upgrade_claims") or {}
+    if claims.get("n"):
+        out["nTsQualSample"] = _fmt(int(claims["n"]))
+        out["nTsQualClaim"] = _fmt(int(claims["claims"]))
+    manual = m.get("upgrade_claims_manual") or {}
+    if manual.get("n"):
+        out["nTsQualClaimManual"] = _fmt(int(manual["claims"]))
+        out["nTsQualRevision"] = _fmt(int(manual["names_revision"]))
+        out["nTsQualKeywordAgree"] = _fmt(int(manual.get("keyword_agrees", 0)))
+        out["nTsQualBoth"] = _fmt(int(manual.get("both", 0)))
+    for block, suffix in (
+        ("protocol_app", ""),
+        ("protocol_app_corpus", "Corpus"),
+        ("protocol_app_classifier", "Classifier"),
+    ):
+        dims = m.get(block) or {}
+        for lang, tag in (("python", "Py"), ("typescript", "Ts"), ("both", "Both")):
+            row = dims.get(lang)
+            if not row:
+                continue
+            out[f"n{tag}App{suffix}"] = _fmt(int(row["n"]))
+            for key, name in (
+                ("pct_modern", "Modern"),
+                ("pct_legacy", "Legacy"),
+                ("pct_features", "Features"),
+            ):
+                out[f"pct{tag}App{name}{suffix}"] = f"{float(row[key]):.1f}"
+            for key, name in (("modern", "Modern"), ("features", "Features")):
+                if row.get(key) is not None:
+                    out[f"n{tag}App{name}Count{suffix}"] = _fmt(int(row[key]))
+            if lang == "typescript":
+                for key, name in (
+                    ("legacy_only", "LegacyOnly"),
+                    ("mixed", "Mixed"),
+                    ("modern_entry_only", "ModernOnly"),
+                    ("reject_any", "RejectAny"),
+                    ("legacy_retired", "Retired"),
+                ):
+                    if row.get(key) is not None:
+                        out[f"nTsApp{name}{suffix}"] = _fmt(int(row[key]))
+                out[f"pctTsAppLegacyOnly{suffix}"] = (
+                    f"{100 * int(row['legacy_only']) / int(row['n']):.1f}"
+                )
+        if dims.get("v2_outside_application_only") is not None and not suffix:
+            out["nVTwoOutsideApp"] = _fmt(int(dims["v2_outside_application_only"]))
+    if (m.get("protocol_app") or {}).get("typescript_not_v2_server") is not None:
+        out["nTsNotVTwoServer"] = _fmt(int(m["protocol_app"]["typescript_not_v2_server"]))
+    legacy_audit = m.get("legacy_audit") or {}
+    if legacy_audit:
+        out["nTsAuditFlagged"] = _fmt(sum(int(v) for v in legacy_audit.values()))
+        out["nTsAuditLegacy"] = _fmt(int(legacy_audit.get("legacy_only", 0)))
+        out["nTsAuditNotVTwo"] = _fmt(int(legacy_audit.get("not_v2_server", 0)))
+        out["nTsAuditCustom"] = _fmt(int(legacy_audit.get("modern_custom", 0)))
+    audit = m.get("audit") or {}
+    if audit.get("decisions"):
+        out["nAuditRepos"] = _fmt(int(audit["repos"]))
+        out["nAuditDecisions"] = _fmt(int(audit["decisions"]))
+        out["nAuditAgreed"] = _fmt(int(audit["agreed"]))
+        out["pctAuditAgree"] = f"{float(audit['pct']):.1f}"
+    hold = m.get("holdout") or {}
+    if hold.get("decisions"):
+        out["nHoldRepos"] = _fmt(int(hold["repos"]))
+        out["nHoldDecisions"] = _fmt(int(hold["decisions"]))
+        out["nHoldAgreed"] = _fmt(int(hold["agreed"]))
+        out["pctHoldAgree"] = f"{float(hold['pct']):.1f}"
+        for field, word in (
+            ("modern", "Modern"),
+            ("legacy", "Legacy"),
+            ("mixed", "Mixed"),
+            ("server", "Server"),
+            ("v2", "VTwo"),
+        ):
+            entry = (hold.get("by_field") or {}).get(field)
+            if entry:
+                out[f"nHold{word}"] = _fmt(int(entry["n"]))
+                out[f"nHold{word}Agreed"] = _fmt(int(entry["agreed"]))
+    no_entry = (m.get("protocol_app") or {}).get("typescript_no_entry")
+    if no_entry is not None:
+        out["nTsNoEntry"] = _fmt(int(no_entry))
+    hist = m.get("history_validation") or {}
+    if hist:
+        out["nHistRepos"] = _fmt(int(hist["repos"]))
+        out["nHistCommits"] = _fmt(int(hist["commits"]))
+        out["pctHistCounts"] = f"{hist['pct_counts']:.1f}"
+        out["pctHistEra"] = f"{hist['pct_era']:.1f}"
+    if m.get("app_scanned"):
+        out["nAppScanned"] = _fmt(int(m["app_scanned"]))
+    if m.get("app_scan_date"):
+        out["appScanDate"] = str(m["app_scan_date"])
+    client = (m.get("protocol") or {}).get("typescript_client_only")
+    if client:
+        out["nTsClientOnly"] = _fmt(int(client["n"]))
+    nosdk = m.get("migration_without_sdk") or {}
+    if nosdk:
+        out["nMigNoSdk"] = _fmt(sum(int(v) for v in nosdk.values()))
+        out["nMigNoSdkDiscover"] = _fmt(int(nosdk.get("modern_server_discover", 0)))
+        out["nMigNoSdkMcpError"] = _fmt(int(nosdk.get("py_v2_MCPError", 0)))
+    pairs = m.get("ceiling_pairs") or {}
+    for key, macro in (
+        ("pairs", "nCeilPairs"),
+        ("same_day", "nCeilSameDay"),
+        ("three_weeks", "nCeilThreeWeeks"),
+        ("pin_repair", "nCeilRepair"),
+        ("move_lift", "nCeilLift"),
+        ("move_dual", "nCeilDual"),
+    ):
+        if pairs:
+            out[macro] = _fmt(int(pairs.get(key, 0)))
+    for block, suffix in (("responses", ""), ("responses_corpus", "Corpus")):
+        resp = m.get(block) or {}
+        for lang, tag in (("python", "Py"), ("typescript", "Ts")):
+            row = resp.get(lang) or {}
+            if not row.get("on_v1"):
+                continue
+            total = int(row["on_v1"])
+            keys = ["moved"]
+            if lang == "python":
+                keys += ["deferred", "ceiling_any", "moved_only", "deferred_only"]
+                keys += ["both", "neither"]
+            out[f"nResp{tag}OnVOne{suffix}"] = _fmt(total)
+            for key in keys:
+                word = "".join(part.capitalize() for part in key.split("_"))
+                value = int(row.get(key, 0))
+                out[f"nResp{tag}{word}{suffix}"] = _fmt(value)
+                out[f"pctResp{tag}{word}{suffix}"] = f"{100 * value / total:.1f}"
+    wording = m.get("pin_wording") or {}
+    if wording.get("n"):
+        out["nPinWording"] = _fmt(int(wording["n"]))
+        out["nPinBreakage"] = _fmt(int(wording.get("breakage", 0)))
+        out["pctPinBreakage"] = f"{100 * int(wording.get('breakage', 0)) / int(wording['n']):.1f}"
+        out["nPinTemporary"] = _fmt(int(wording.get("temporary", 0)))
+        check = wording.get("check") or {}
+        if check.get("n"):
+            out["nPinCheck"] = _fmt(int(check["n"]))
+            out["nPinCheckAgree"] = _fmt(int(check["agree"]))
+    themes = m.get("issue_themes") or {}
+    if themes.get("n"):
+        out["nIssuesSampled"] = _fmt(int(themes["sampled"]))
+        out["nIssues"] = _fmt(int(themes["n"]))
+        for key, word in (
+            ("names_rename", "Rename"),
+            ("import_error", "ImportError"),
+            ("fresh_install", "FreshInstall"),
+            ("proposes_pin", "ProposesPin"),
+            ("no_upper_bound", "NoUpperBound"),
+        ):
+            out[f"nIssues{word}"] = _fmt(int(themes.get(key, 0)))
+    feature = m.get("feature_check") or {}
+    if feature.get("n"):
+        out["nFeatCheck"] = _fmt(int(feature["n"]))
+        out["nFeatCheckTrue"] = _fmt(int(feature["true"]))
+    vignette = m.get("sampling_vignette") or {}
+    if vignette.get("n"):
+        out["nSampVignette"] = _fmt(int(vignette["n"]))
+        out["nSampKept"] = _fmt(int(vignette.get("kept", 0)))
+        out["nSampDual"] = _fmt(int(vignette.get("dual_era", 0)))
+        out["nSampReplaced"] = _fmt(int(vignette.get("replaced", 0)))
+    if m.get("n_agent_before"):
+        out["nAgentBefore"] = _fmt(int(m["n_agent_before"]))
+    return out
 
 
 # The two ends of the query set: one matches a revision date anywhere in a
@@ -369,6 +633,39 @@ def to_latex(summary: Mapping[str, Any]) -> str:
         kappa = (labels.get("kappa") or {}).get("detector_correct")
         if kappa is not None:
             macros["kappaOverall"] = f"{float(kappa):.2f}"
+            # Under assisted labeling the coders verified the same pre-labels,
+            # so the prose must call this agreement between verifiers.
+            macros["kappaVerifiers"] = f"{float(kappa):.2f}"
+        assisted = labels.get("assisted") or {}
+        uptake = list((assisted.get("uptake") or {}).values())
+        if uptake:
+            accepted = sum(float(u["accepted"]) for u in uptake) / len(uptake)
+            macros["pctLlmAccepted"] = f"{100 * accepted:.1f}"
+            changed = sum(int(u["cells_changed"]) for u in uptake)
+            macros["nLlmCellsChanged"] = _fmt(changed)
+        llm = (assisted.get("llm_vs_reference") or {}).get("detector_correct")
+        if llm:
+            macros["kappaLlmDetector"] = f"{float(llm['kappa']):.2f}"
+        blind = labels.get("blind") or {}
+        if blind.get("n"):
+            macros["nBlind"] = _fmt(blind["n"])
+            detector = (blind.get("agreement") or {}).get("detector_correct")
+            if detector:
+                macros["kappaBlind"] = f"{float(detector['kappa']):.2f}"
+        # Precision on the held-out round, for the kinds whose evidence the
+        # SANER events rest on. A round with a blind subset is held out from the
+        # detector's rules; requiring an adjudicated source keeps these at [??]
+        # until its disagreements are resolved, instead of citing round 1.
+        held_out = blind.get("n") and str(labels.get("precision_source", "")).startswith(
+            "adjudicated"
+        )
+        for kind, word in (("migration", "Migration"), ("v2_adoption", "VTwoAdoption")):
+            entry = by_kind.get(kind) if held_out else None
+            if entry:
+                macros[f"precHeldOut{word}"] = f"{float(entry['precision']):.2f}"
+                macros[f"precHeldOut{word}Low"] = f"{float(entry['ci_low']):.2f}"
+                macros[f"precHeldOut{word}High"] = f"{float(entry['ci_high']):.2f}"
+                macros[f"nHeldOut{word}"] = _fmt(int(entry["n"]))
 
     # The size cap: what it keeps and what lifting it would cost.
     size = summary.get("repo_size") or {}
@@ -411,6 +708,7 @@ def to_latex(summary: Mapping[str, Any]) -> str:
         if entry.get("median_lag_adopters") is not None:
             macros["lagMedian" + suffix] = _fmt(float(entry["median_lag_adopters"]))
             macros["lagMean" + suffix] = f"{float(entry['mean_lag_adopters']):.0f}"
+    macros.update(_measurement_macros(summary.get("measurement") or {}))
     # Drawn, as against coded: nSampled is the count actually labeled.
     for macro, key in (("nSearchQueries", "n_search_queries"), ("nSampleSize", "n_sample_size")):
         if summary.get(key):
@@ -442,6 +740,19 @@ def to_latex(summary: Mapping[str, Any]) -> str:
         macros["nPinMessages"] = _fmt(pins["n"])
         macros["pctPinBreakage"] = _pct(int(pins.get("breakage", 0)), int(pins["n"]))
         macros["nPinTemporary"] = _fmt(pins.get("temporary", 0))
+    # The coders' reading of the sampled pin episodes: why the ceiling went in
+    # and whether the repository was still pinned when the episode closed.
+    coded = summary.get("coded_pins") or {}
+    if coded.get("n"):
+        from mcp_migration.report.labels import REPAIR_TRIGGERS
+
+        triggers = coded.get("trigger") or {}
+        macros["nPinCodedSampled"] = _fmt(coded["n_sampled"])
+        macros["nPinCoded"] = _fmt(coded["n"])
+        macros["nPinCodedPinned"] = _fmt((coded.get("end_state") or {}).get("pinned_below_2", 0))
+        macros["nPinCodedRepair"] = _fmt(sum(int(triggers.get(t, 0)) for t in REPAIR_TRIGGERS))
+        macros["nPinCodedProactive"] = _fmt(triggers.get("proactive", 0))
+        macros["nPinCodedUnknown"] = _fmt(triggers.get("unknown", 0))
     issues = qual.get("issues") or {}
     if issues.get("n"):
         macros["nIssuesCoded"] = _fmt(issues["n"])
@@ -495,8 +806,10 @@ def gap_sensitivity(paths: Any, gaps: Sequence[int] = SENSITIVITY_GAPS) -> list[
 def load_all(paths: Any) -> dict[str, Any]:
     """Read every pipeline output the summary needs; missing files count as zero."""
     from mcp_migration.collect.filtering import Criteria, exclusion_reason
+    from mcp_migration.report.labels import coded_profile
     from mcp_migration.report.labels import read_sheet as read_sheet_rows
-    from mcp_migration.report.lag import corpus_seeds, load_lag
+    from mcp_migration.report.lag import censor_date, corpus_seeds, load_lag
+    from mcp_migration.report.measurement import load_measurement
     from mcp_migration.storage import read_json, read_jsonl, read_lines
 
     metadata = list(read_jsonl(paths.repo_meta)) if paths.repo_meta.exists() else []
@@ -527,16 +840,25 @@ def load_all(paths: Any) -> dict[str, Any]:
         "qualitative": (read_json(paths.qualitative) if paths.qualitative.exists() else {}),
         "lag": load_lag(paths, seeds := corpus_seeds(paths)),
         "lag_all": load_lag(paths),
+        "measurement": load_measurement(paths, censor_date(paths.heads_dir), seeds),
         # Counted from what ran, not from the config: a query that never
         # completed left no file and contributed nothing.
         "n_search_queries": len(list(paths.search_dir.glob("*.jsonl"))),
+        # The latest round is the one held out from the detector's rules, so it
+        # is the sample the reported precision comes from.
         "n_sample_size": (
-            sum(1 for _ in read_sheet_rows(paths.labeling_sheet))
-            if paths.labeling_sheet.exists()
+            sum(1 for _ in read_sheet_rows(paths.labeling_sheet(rounds[-1])))
+            if (rounds := paths.labeling_rounds())
             else 0
         ),
         "harvest_outcomes": (
             list(read_jsonl(paths.harvest_outcomes)) if paths.harvest_outcomes.exists() else []
+        ),
+        # Pins were sampled only in round 1, and its adjudicated sheet is final.
+        "coded_pins": (
+            coded_profile(read_sheet_rows(adjudicated), "pin_below_2")
+            if (adjudicated := paths.labeling_round(1) / "adjudicated.csv").exists()
+            else {}
         ),
         "lag_repos": sum(
             1 for f in paths.commits_dir.glob("*.jsonl") if f.stem.replace("__", "/", 1) in seeds

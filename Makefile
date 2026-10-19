@@ -15,3 +15,4 @@ lint:
 	mypy
 
 check: lint test
+

@@ -1,23 +1,41 @@
 # Labeling codebook (unit: migration episode)
 
-Two coders label `data/labeling/sample.csv` independently, each in their own
-copy under `data/labeling/coderA/` and `data/labeling/coderB/`.
-`mcp-migration labels` then computes detector
-precision (overall and per episode kind) and Cohen's kappa per column, and
-`stats` carries those figures into the manuscript. Resolve disagreements by
-discussion *after* recording the kappa, so the agreement figure describes
-independent coding rather than the consensus that follows it.
+Labeling is **LLM-assisted**. An LLM pre-labels every sampled episode under
+this codebook. Two coders then verify every label independently, each in their
+own copy, and their disagreements are adjudicated. In each round a **blind
+subset** is coded by both coders from scratch, without the pre-labels. That
+subset gives the independent agreement figure and checks the LLM's labels.
+The full protocol, the prompts and their changelog are in
+[`docs/llm-labeling/`](llm-labeling/README.md).
+
+`mcp-migration labels` computes detector precision (overall and per episode
+kind) and Cohen's kappa per column, and `stats` carries those figures into the
+summary and its LaTeX macros. Kappa between two verifiers of the same pre-labels measures shared
+acceptance of the suggestions, not independent coding. It is reported as
+verifier agreement, next to how much of the pre-labels each coder changed
+(`--prelabels`) and kappa on the blind subset (`--blind`). Resolve
+disagreements by discussion *after* recording these numbers.
 
 There are five judgements per episode plus free-text notes.
+
+## Verifying a pre-labelled row
+
+Treat every pre-label as a claim to check, not a default to accept. Open the
+episode and form your own view of `detector_correct` before reading the LLM's
+value and notes. Change any cell you disagree with and say why in `notes`. A
+cell you keep is a cell you would have written yourself. Blind rows (empty
+when you open the sheet) are coded from scratch. Do not open the LLM's sheet
+for the round until both coders have finished.
 
 ## How to code, step by step
 
 ### Before you start
 
-1. **Use your own copy.** Coder A codes `data/labeling/coderA/sample.csv` and
-   coder B `data/labeling/coderB/sample.csv`; both start as copies of the blank
-   sheet. Never edit `data/labeling/sample.csv` itself; it is the shared draw
-   both copies come from, and `labels` compares the two.
+1. **Use your own copy.** In round N, coder A codes
+   `data/labeling/roundN/coderA.csv` and coder B `data/labeling/roundN/coderB.csv`
+   (`mcp-migration label --coder A --round N`); both start as copies of the
+   blank sheet. Never edit `data/labeling/roundN/sample.csv` itself; it is the
+   shared draw both copies come from, and `labels` compares the two.
 2. **Agree not to discuss episodes while coding.** Cohen's kappa measures
    independent agreement. Talking through a hard case as it comes up turns the
    agreement figure into a measure of the conversation. Save it for step 8.
@@ -73,17 +91,60 @@ There are five judgements per episode plus free-text notes.
 8. **Run the comparison before you reconcile:**
 
    ```
-   mcp-migration labels data/labeling/coderA/sample.csv data/labeling/coderB/sample.csv
+   mcp-migration labels data/labeling/round1/coderA.csv data/labeling/round1/coderB.csv
    ```
 
    This writes precision (weighted by stratum size), per-kind precision, and
-   kappa per column. Record those numbers. They describe independent coding, and once you have discussed
-   the disagreements you cannot recover them.
-9. **Then reconcile.** Work through the disagreements, agree a value for each,
-   and keep a reconciled sheet if you want one for analysis. The manuscript
-   reports the kappa from step 8, not from the reconciled sheet.
+   kappa per column. For an assisted round, add the pre-labels and the blind
+   subset:
+
+   ```
+   mcp-migration labels data/labeling/round2/coderA.csv data/labeling/round2/coderB.csv \
+     --prelabels data/labeling/round2/llm/coderLLM.csv --blind data/labeling/round2/blind_ids.txt
+   ```
+
+   Record those numbers before discussing anything. Once you have discussed
+   the disagreements, you cannot recover them.
+9. **Then reconcile.** Work through the disagreements and agree a value for
+   each, using the rules under "Adjudication rules" below. Keep the result in
+   `data/labeling/roundN/adjudicated.csv`, with an `adjudication_note` column
+   saying which rule settled each changed cell. Then rerun step 8 with
+   `--adjudicated data/labeling/roundN/adjudicated.csv`, which takes precision
+   from the reconciled sheet. Report agreement from the two coders' sheets
+   (verifier kappa, the share of pre-labels kept, and blind kappa) and
+   precision from the reconciled sheet.
 10. **Refresh the statistics:** `mcp-migration stats`, which carries precision
     and kappa into the outputs.
+
+### Adjudication rules
+
+These settled the disagreements in the first sample. Apply them while coding
+too.
+
+- **R1. A custom implementation counts.** A project's own MCP code that
+  changes the protocol revision it speaks is `detector_correct = yes`, even
+  with no official SDK involved.
+- **R2. Moving off a v1 API counts.** Deliberately replacing a v1 API that v2
+  removes (for example `streamablehttp_client`) is `yes`, even when the
+  project stays on v1.
+- **R3. `reverted` beats `pinned_below_2`.** If v2 was adopted and then undone
+  within the episode, code `reverted`, even when the undo also adds a `<2` cap.
+- **R4. Fully custom code is `no_official_sdk`.** It stays `no_official_sdk`
+  when it serves both protocol eras. `dual_era` is for code that runs on, or
+  mixes, official SDK majors.
+- **R5. Policy bounds are `proactive`.** Upper bounds or upgrades added as
+  hardening or policy, with nothing reported broken, are `proactive`, not
+  `unknown`.
+- **R6. `human` needs positive evidence.** That means terse, informal or
+  GitHub web-UI messages and no agent markers anywhere in the change.
+- **R7. Otherwise leave the author blank.** Polished or templated messages with
+  no agent markers are ambiguous, so leave the cell blank and say so in `notes`.
+- **R8. Judge the commit that makes the change.** Code the author of the commit
+  that makes the migration change. Agent markers on other commits in the
+  episode do not count. If that commit has no markers, leave the author blank.
+- **R9. `bot` only for bot-authored changes.** Code `bot` only when the
+  migration change itself was made by a bot. A Dependabot bump earlier in the
+  episode does not make the episode `bot`.
 
 ## The unit
 

@@ -1,41 +1,43 @@
-# CoderLLM — LLM-coded sample
+# Round-1 LLM pre-labels
 
-`sample.csv` is the 520-episode labeling sample (`data/labeling/sample.csv`)
-coded by an LLM (Claude Opus 5.5, via Claude Code) acting as a third coder.
-It has the same format as `coderA/sample.csv` and `coderB/sample.csv`: the
-prefilled columns are unchanged, and the codebook columns (`detector_correct`,
-`end_state`, `trigger`, `author_kind_verified`, `deprecated`, `notes`) are
-filled in.
+`coderLLM.csv` holds the round-1 pre-labels: the 520 episodes of
+`data/labeling/round1/sample.csv` labeled by an LLM (Claude Opus 5.5 in Claude Code,
+2026-10-10 to 13) under the codebook. **Coders A and B then verified every
+row** (`round1/coderA.csv`, `round1/coderB.csv`), and their disagreements were
+adjudicated (`round1/adjudicated.csv`). Every label used in the analysis has
+been checked by both coders.
 
-**This is not an independent human coder.** Use it as a reference or
-tie-break sheet, or to compare LLM and human labels. Do not count it toward
-human inter-rater agreement.
+How the pre-labels were made is documented in
+[`docs/llm-labeling/prompt-round1.md`](../../../docs/llm-labeling/prompt-round1.md).
+That includes the instruction, the evidence dossiers, the working rules
+verbatim, and the known weaknesses that round 2 fixes. Agreement under assisted
+labeling is reported as described in
+[`docs/llm-labeling/README.md`](../../../docs/llm-labeling/README.md): the share
+of pre-label cells each coder kept, verifier κ, and the LLM's agreement with
+the adjudicated labels.
+
+| | Coder A | Coder B |
+|---|---|---|
+| Cells changed (of 2,600) | 42 (1.6%) | 28 (1.1%) |
+| Episodes with any change | 33 | 28 |
+| Detector verdicts changed | 3 | 0 |
 
 ## Method
 
-- **Guidance.** The coder followed `docs/codebook.md` and
-  `docs/coding-examples.md`, and in places where the codebook leaves room for
-  judgment it applied the fixed decision rules below to every episode.
-- **Evidence.**
-  - Per-episode dossiers were built from the cloned repositories. Each one
-    gives, for every commit:
-    - the message and trailers;
-    - the author account, git name and email domain;
-    - the SDK- and protocol-relevant diff lines;
-    - the dependency-file changes;
-    - the repo's issues and PRs around the episode window;
-    - a snapshot of the repo state after the episode's last commit.
-  - When a dossier was not conclusive, the coder looked up commits, issues,
-    PRs and files through the GitHub API.
-  - The detector's own verdict was shown last and read only after the coder
-    had formed a judgment.
-- **Process.**
-  - Episodes were coded in 26 batches of 20.
-  - Each record was checked with `mcp_migration.labeling.sheet.validate()` and
-    `status()`.
-  - All 520 rows are `done`.
-- **Duplicate episodes.** Some episodes are made of the same commits (mirrors,
-  forks, or vendored copies). Each such group got the same codes.
+- **Evidence.** One dossier per episode, built from GitHub API responses
+  (`scripts/llm_labeling/collect.py`, `dossier.py --with-detector`). For every
+  commit it gives the message and trailers, the author account, git name and
+  email domain, the pull request, and the SDK- and protocol-relevant diff
+  lines. It also lists issues and PRs around the episode and the repository
+  state after it. When a dossier was not conclusive, the LLM looked up commits,
+  issues, PRs and files directly.
+- **Detector verdict.** Each dossier ended with the detector's verdict, marked
+  "read after judging". Because the LLM read whole dossiers, it was not blind to
+  it. Round 2 leaves that line out.
+- **Process.** Episodes were coded in 26 batches of 20. Every row was checked
+  with the labeling app's validator, and all 520 are complete. Episodes made of
+  the same commits (mirrors, forks, vendored copies) got the same codes. After
+  assembly, two triggers were corrected to `unknown`.
 
 ## Decision rules
 
@@ -106,7 +108,7 @@ human inter-rater agreement.
 | author_kind_verified | ai_agent_assisted 129 · human 21 · blank 122 (among yes rows) |
 | deprecated | 10 rows |
 
-Per-kind detector precision from `mcp-migration labels`:
+Detector precision computed from these pre-labels alone, before verification. The study uses the adjudicated figures instead:
 
 | kind | precision |
 |---|---|

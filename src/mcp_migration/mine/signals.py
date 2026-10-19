@@ -33,7 +33,9 @@ SIGNAL_PATTERNS: dict[str, str] = {
     "ts_v1_sdk_pkg": r"@modelcontextprotocol/sdk(?![\w-])",
     "ts_v2_split_pkg": r"@modelcontextprotocol/(server|client)(?![\w-])",
     # Protocol-era markers.
-    "modern_server_discover": r"server/discover",
+    # Bounded so workflow names and URLs such as "acme/mcp-server/discover" or
+    # ".../authorization-server/discovery" do not count.
+    "modern_server_discover": r"(?<![\w/.-])server/discover(?![\w/-])",
     "modern_subscriptions_listen": r"subscriptions/listen",
     "modern_input_required": r"\bInputRequiredResult\b",
     "modern_version_const": r"\bLATEST_MODERN_VERSION\b|\bMODERN_PROTOCOL_VERSIONS\b",
@@ -51,6 +53,32 @@ SIGNAL_PATTERNS: dict[str, str] = {
     "dep_logging": r"logging/setLevel|\bsend_log_message\s*\(|\bsendLoggingMessage\s*\(",
     "dep_resource_subscribe": r"resources/subscribe|\bsubscribe_resource\b",
     "dep_warning_handled": r"\bMCPDeprecationWarning\b|\bNoBackChannelError\b",
+    # TypeScript v2 era serving. Unlike Python's v2, whose server always answers
+    # both eras, a TypeScript v2 server built from the v1-style classes keeps
+    # speaking only the 2025 protocol; 2026-07-28 needs one of these entry
+    # points, and legacy traffic is refused only on request. Deliberately in no
+    # group below, so adding them changes no episode.
+    "ts_v2_modern_entry": r"\bcreateMcpHandler\b|\bserveStdio\b",
+    "ts_legacy_reject": r"\blegacy\s*:\s*[\"']reject[\"']",
+    # The two halves of ts_v2_split_pkg, kept apart because only a server can
+    # serve a protocol revision; a client-only repository is not at risk.
+    "ts_v2_server_pkg": r"@modelcontextprotocol/server(?![\w-])",
+    "ts_v2_client_pkg": r"@modelcontextprotocol/client(?![\w-])",
+    # Feature use through SDK helpers, not only the protocol strings: the
+    # TypeScript inputRequired(...) builder and the Python v2 elicitation type
+    # and subscription bus (client-side listen/listChanged are not server use).
+    "ts_v2_input_required": r"\binputRequired(?:\.\w+)?\s*\(",
+    "py_v2_elicit": r"\bElicit\[",
+    "py_v2_subscription_bus": r"\bSubscriptionBus\b",
+    # Legacy serving that survives legacy:'reject' on another handler: the
+    # documented routing helpers, and v1-style transports constructed on v2.
+    "ts_legacy_route": r"\bisLegacyRequest\b|\blegacyStatelessFallback\b",
+    # Not when the transport is handed to serveStdio as its `transport:` option,
+    # which serves both eras through the new entry point.
+    "ts_v1_transport_class": (
+        r"^(?!.*\btransport\s*:).*\bnew\s+"
+        r"(?:StreamableHTTPServerTransport|StdioServerTransport|SSEServerTransport)\b"
+    ),
 }
 
 SIGNALS: dict[str, re.Pattern[str]] = {k: re.compile(v) for k, v in SIGNAL_PATTERNS.items()}
@@ -64,6 +92,11 @@ MODERN_FEATURE_KEYS = (
     "modern_input_required",
 )
 V2_ADDED_KEYS = (*V2_SDK_KEYS, "py_v2_MCPError", *MODERN_FEATURE_KEYS)
+# What an episode's kind may rest on. MCPError still makes a commit related,
+# so grouping and episode ids are unchanged, but alone it proves nothing:
+# projects define their own MCPError class (Python, Go, Rust), and in the coded
+# sample 33 of the 45 episodes resting on it alone were false.
+V2_EVIDENCE_KEYS = tuple(k for k in V2_ADDED_KEYS if k != "py_v2_MCPError")
 V1_REMOVED_KEYS = (
     *V1_SDK_KEYS,
     "py_v1_McpError",
@@ -78,6 +111,56 @@ SOURCE_SUFFIXES = frozenset(
     {".py", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".go", ".cs", ".java", ".kt", ".rs", ".csproj"}
 )
 MANIFEST_NAMES = frozenset({"pyproject.toml", "setup.py", "setup.cfg", "package.json", "go.mod"})
+
+
+# Directories and files that hold tests, examples and documentation rather than
+# the application: a marker there is not evidence of use.
+NON_APP_PARTS = frozenset(
+    {
+        "test",
+        "tests",
+        "__tests__",
+        "spec",
+        "specs",
+        "example",
+        "examples",
+        "demo",
+        "demos",
+        "docs",
+        "doc",
+        "fixtures",
+        "e2e",
+        "samples",
+        "sample",
+        "benchmark",
+        "benchmarks",
+        "release",
+        "releases",
+        "mocks",
+        "__mocks__",
+    }
+)
+# Test files by name, including test servers and fixtures named by token.
+_NON_APP_FILE = re.compile(
+    r"(^test_.*\.py$|_test\.py$|\.(test|spec)\.[cm]?[jt]sx?$|^conftest\.py$"
+    r"|(^|[-_.])(test|tests|fixture|fixtures|mock|mocks)[-_.])"
+)
+
+
+def is_comment_line(line: str) -> bool:
+    """A line that is only a comment, in Python or JavaScript/TypeScript."""
+    stripped = line.lstrip()
+    return stripped.startswith(("#", "//", "/*", "*"))
+
+
+def is_application_path(path: str) -> bool:
+    """A relevant path outside tests, examples and documentation."""
+    p = PurePosixPath(path.replace("\\", "/"))
+    if NON_APP_PARTS.intersection(part.lower() for part in p.parts[:-1]):
+        return False
+    return not _NON_APP_FILE.search(p.name)
+
+
 SKIP_DIRS = frozenset(
     {"node_modules", ".git", "dist", "build", ".venv", "venv", "vendor", "__pycache__"}
 )
@@ -163,7 +246,8 @@ PREFILTER_KEYWORDS = (
     "httpx2",
     "server/discover",
     "subscri",  # subscriptions/listen, resources/subscribe, subscribe_resource
-    "inputrequiredresult",
+    "inputrequired",  # InputRequiredResult and the inputRequired(...) builder
+    "elicit",
     "modern_",
     "notifications/initialized",
     "sessionidgenerator",
@@ -174,6 +258,8 @@ PREFILTER_KEYWORDS = (
     "logging/setlevel",
     "send_?log(ging)?_?message",
     "nobackchannelerror",
+    "servestdio",  # createMcpHandler is caught by "mcp"
+    "legacy",
     *PROTOCOL_REVISIONS,
 )
 # POSIX extended syntax, which is what `git log -G` compiles; used with -i.

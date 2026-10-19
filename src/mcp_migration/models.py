@@ -59,6 +59,11 @@ class Episode:
     replacements: list[str] = field(default_factory=list)
     scope: str = "protocol_only"
     head_static_era: str | None = None
+    # The repository's static era just before the episode's first commit and
+    # just after its last. head_static_era is the state at the snapshot, which
+    # later episodes may have moved; these two are the episode's own outcome.
+    era_before: str | None = None
+    era_after: str | None = None
 
     @property
     def first_commit_url(self) -> str:

@@ -13,11 +13,17 @@ from mcp_migration.mine.signals import count_signals, is_relevant_path
         ('"mcp[cli]>=2.0.1"', {"py_pin_mcp_v2"}),
         ('"fastmcp>=2.0"', {"py_standalone_fastmcp"}),
         ('"@modelcontextprotocol/sdk": "^1.2"', {"ts_v1_sdk_pkg"}),
-        ('import { x } from "@modelcontextprotocol/server"', {"ts_v2_split_pkg"}),
+        (
+            'import { x } from "@modelcontextprotocol/server"',
+            {"ts_v2_split_pkg", "ts_v2_server_pkg"},
+        ),
         ('"@modelcontextprotocol/server-filesystem": "1"', set()),
         ('mcp = FastMCP("Demo", stateless_http=True)', {"v1_stateless_flag"}),
         ("await ctx.session.create_message(msgs)", {"dep_sampling"}),
         ("headers['Mcp-Session-Id']", {"legacy_session_header"}),
+        ('dispatch(handler, "server/discover", {})', {"modern_server_discover"}),
+        ('WORKFLOW = "stigmer/mcp-server/discover"', set()),
+        ("/.well-known/oauth-authorization-server/discovery", set()),
     ],
 )
 def test_signal_matches(line: str, expected: set[str]) -> None:
@@ -80,6 +86,18 @@ SIGNAL_EXAMPLES = {
     "dep_logging": ['"logging/setLevel"', "send_log_message(x)", "sendLoggingMessage(x)"],
     "dep_resource_subscribe": ['"resources/subscribe"', "def subscribe_resource(uri):"],
     "dep_warning_handled": ["MCPDeprecationWarning", "except NoBackChannelError:"],
+    "ts_v2_modern_entry": ["export default createMcpHandler(build)", "await serveStdio(() => s)"],
+    "ts_legacy_reject": ["createMcpHandler(f, { legacy: 'reject' })", '{legacy:"reject"}'],
+    "ts_v2_server_pkg": ['import { McpServer } from "@modelcontextprotocol/server"'],
+    "ts_v2_client_pkg": ['"@modelcontextprotocol/client": "^2.0.0"'],
+    "ts_v2_input_required": ["return inputRequired({ q })", "inputRequired.elicit(form)"],
+    "py_v2_elicit": ["async def ask() -> Elicit[Quantity]:"],
+    "py_v2_subscription_bus": ["bus = SubscriptionBus(redis)"],
+    "ts_legacy_route": ["if (await isLegacyRequest(req))", "legacyStatelessFallback(build)"],
+    "ts_v1_transport_class": [
+        "const t = new StdioServerTransport();",
+        "new StreamableHTTPServerTransport({})",
+    ],
 }
 
 
@@ -123,3 +141,42 @@ def test_the_prefilter_paths_cover_every_relevant_file(path: str) -> None:
     assert is_relevant_path(path)
     # git matches a pathspec without glob magic like fnmatch without FNM_PATHNAME.
     assert any(fnmatch(path, spec) for spec in PREFILTER_PATHSPECS)
+
+
+@pytest.mark.parametrize(
+    ("path", "app"),
+    [
+        ("src/server.ts", True),
+        ("packages/mcp/src/index.ts", True),
+        ("src/__tests__/server.test.ts", False),
+        ("tests/test_server.py", False),
+        ("server_test.py", False),
+        ("examples/basic/server.py", False),
+        ("docs/snippets/handler.ts", False),
+        ("src/handler.spec.ts", False),
+        ("packages/sdk/stdio-negotiation-test-server.ts", False),
+        ("src/bin/debug-fixture.ts", False),
+        ("release/ksql-mcp.js", False),
+        ("src/latest.ts", True),
+    ],
+)
+def test_application_paths_exclude_tests_examples_and_docs(path: str, app: bool) -> None:
+    from mcp_migration.mine.signals import is_application_path
+
+    assert is_application_path(path) is app
+
+
+def test_a_transport_passed_into_serveStdio_is_not_a_legacy_entry_point() -> None:
+    line = "const handle = serveStdio(factory, { transport: new StdioServerTransport(i, o) })"
+    found = count_signals([line])
+    assert "ts_v2_modern_entry" in found
+    assert "ts_v1_transport_class" not in found
+
+
+def test_comment_lines_are_recognised() -> None:
+    from mcp_migration.mine.signals import is_comment_line
+
+    assert is_comment_line("  // Passing { legacy: 'reject' } would break 2025 clients")
+    assert is_comment_line("# Known upstream issue (mcp==2.0.0)")
+    assert is_comment_line(" * `createMcpHandler` builds a fresh server")
+    assert not is_comment_line("const h = createMcpHandler(build)")

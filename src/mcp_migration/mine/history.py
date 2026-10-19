@@ -96,6 +96,36 @@ def _iter_head_lines(repo_dir: Path) -> Iterator[str]:
         yield from data.decode("utf-8", errors="ignore").splitlines()
 
 
+def scan_head_split(repo_dir: Path) -> dict[str, dict[str, int]]:
+    """HEAD signal counts over all relevant files and over application files only.
+
+    The application view leaves out tests, examples and documentation, where a
+    marker is not evidence that the application uses a feature or entry point.
+    """
+    from mcp_migration.mine.signals import is_application_path, is_comment_line
+
+    every: Counter[str] = Counter()
+    app: Counter[str] = Counter()
+    for item in Repo(str(repo_dir)).head.commit.tree.traverse():
+        if not isinstance(item, Blob):
+            continue
+        path = str(item.path)
+        if not is_relevant_path(path) or SKIP_DIRS.intersection(PurePosixPath(path).parts):
+            continue
+        try:
+            lines = item.data_stream.read().decode("utf-8", errors="ignore").splitlines()
+        except Exception as exc:  # unreadable or corrupt object
+            log.debug("skipping %s: %s", path, exc)
+            continue
+        every.update(count_signals(lines))
+        if is_application_path(path):
+            # In application code a comment is not use: an audit found comments
+            # describing an option ("passing legacy:'reject' would...") counted
+            # as the option itself.
+            app.update(count_signals(line for line in lines if not is_comment_line(line)))
+    return {"signals": dict(every), "app_signals": dict(app)}
+
+
 def scan_head(repo_dir: Path) -> HeadRecord:
     counts = count_signals(_iter_head_lines(repo_dir))
     return HeadRecord(
